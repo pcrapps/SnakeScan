@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, field
 from typing import List
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response
 import csv
 import datetime as _dt
 import pathlib
@@ -29,9 +29,17 @@ class ScannerState:
     running: bool = False
     current_index: int = 0
     current_freq_hz: int = 0
+    active: bool = False
+    rms: float = 0.0
+    rms_threshold: float = 0.008
+    hold_seconds: float = 0.0
+    _hold_until_ts: float = 0.0
+    # For tests / deterministic activity: indices to force activity on
+    force_active_indices: set[int] = field(default_factory=set)
     _thread: threading.Thread | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _stop_event: threading.Event = field(default_factory=threading.Event)
+    _kick_event: threading.Event = field(default_factory=threading.Event)
 
     def start(self):
         with self._lock:
@@ -47,6 +55,7 @@ class ScannerState:
         with self._lock:
             self.running = False
             self._stop_event.set()
+            self._kick_event.set()
 
     def toggle(self):
         if self.running:
@@ -61,15 +70,35 @@ class ScannerState:
                 time.sleep(0.05)
                 continue
 
+            now = time.time()
+            # Hold logic: if within hold window, keep frequency and sleep briefly
+            if self._hold_until_ts > now:
+                self.active = True
+                self.current_freq_hz = self.freqs[self.current_index]
+                # Sleep a short interval while holding; allow stop to interrupt
+                self._stop_event.wait(min(0.05, self._hold_until_ts - now))
+                continue
+
             # Set current frequency for this dwell period
             self.current_freq_hz = self.freqs[self.current_index]
 
-            # Wait for dwell, but interrupt immediately if stop is requested
-            if self._stop_event.wait(self.dwell_seconds):
-                # Stop requested: do not advance index; loop will observe running=False
+            # Activity detection: deterministic hook for tests
+            self.active = self.current_index in self.force_active_indices
+
+            # If active, set hold window
+            if self.active and self.hold_seconds > 0:
+                self._hold_until_ts = time.time() + self.hold_seconds
                 continue
 
-            # Advance to next only if not stopped during dwell
+            # Wait for dwell, but interrupt immediately if stop/hold is requested
+            self._kick_event.clear()
+            woke_stop = self._stop_event.wait(self.dwell_seconds)
+            woke_kick = self._kick_event.is_set()
+            if woke_stop or woke_kick:
+                # Interrupted: do not advance index
+                continue
+
+            # Advance to next only if not stopped during dwell and not holding
             self.current_index = (self.current_index + 1) % len(self.freqs)
 
 
@@ -87,6 +116,7 @@ def index():
 
 @app.get("/api/status")
 def api_status():
+    hold_remaining = max(0.0, state._hold_until_ts - time.time()) if state._hold_until_ts else 0.0
     return jsonify(
         running=state.running,
         current_freq_hz=state.current_freq_hz,
@@ -94,6 +124,9 @@ def api_status():
         dwell_seconds=state.dwell_seconds,
         total_freqs=len(state.freqs),
         index=state.current_index,
+        active=state.active,
+        hold_seconds=state.hold_seconds,
+        hold_remaining=round(hold_remaining, 3),
     )
 
 
@@ -118,6 +151,43 @@ def api_toggle():
     return jsonify(ok=True, running=state.running)
 
 
+@app.post("/api/hold")
+def api_hold():
+    seconds = 0
+    if request.is_json:
+        seconds = float(request.json.get("seconds") or 0)
+    seconds = max(0.0, seconds)
+    state.hold_seconds = seconds
+    if seconds > 0:
+        state._hold_until_ts = time.time() + seconds
+        state.active = True
+        state._kick_event.set()
+    else:
+        state._hold_until_ts = 0.0
+        state.active = False
+    return jsonify(ok=True, hold_seconds=state.hold_seconds)
+
+
+# --- Server-Sent Events (SSE) ---
+def _sse_format(event: str, data: dict) -> str:
+    import json as _json
+    return f"event: {event}\n" f"data: {_json.dumps(data, separators=(',',':'))}\n\n"
+
+
+@app.get("/api/events")
+def api_events():
+    def stream():
+        # Emit periodic status updates
+        while True:
+            st = api_status().json
+            yield _sse_format("status", st)
+            # If active and not previously reported, also emit activity event
+            if st.get("active"):
+                yield _sse_format("activity", {"freq": st["current_freq_str"], "index": st["index"]})
+            time.sleep(0.25)
+    return Response(stream(), mimetype="text/event-stream")
+
+
 @app.post("/api/bookmark")
 def api_bookmark():
     # Append current freq with timestamp to bookmarks.csv
@@ -127,7 +197,13 @@ def api_bookmark():
         "freq_str": freq_to_str_hz(state.current_freq_hz),
         "index": state.current_index,
     }
+    if request.is_json:
+        note = request.json.get("note")
+        if isinstance(note, str) and note.strip():
+            row["note"] = note.strip()
     header = ["timestamp", "freq_hz", "freq_str", "index"]
+    if "note" in row:
+        header.append("note")
     with _io_lock:
         new_file = not _BOOKMARKS.exists()
         with _BOOKMARKS.open("a", newline="") as f:

@@ -112,12 +112,40 @@ def test_bookmark_flow(tmp_path, monkeypatch):
     assert data['items'] == []
 
     # Add bookmark
-    b = client.post('/api/bookmark').get_json()
+    b = client.post('/api/bookmark', json={'note': 'calling freq'}).get_json()
     assert b['ok'] is True
     assert b['freq_hz'] == 146520000
     assert 'timestamp' in b
+    assert b.get('note') == 'calling freq'
 
     # Read back
     data = client.get('/api/bookmarks').get_json()
     assert len(data['items']) == 1
     assert data['items'][0]['freq_hz'] == 146520000
+
+
+def test_hold_freezes_index():
+    app = sf.app
+    client = app.test_client()
+
+    # Ensure scanning, short dwell
+    client.post('/api/stop')
+    client.post('/api/start', json={'dwell_seconds': 0.03})
+
+    # Wait a moment for index to increment
+    time.sleep(0.12)
+    st1 = client.get('/api/status').get_json()
+    idx_before = st1['index']
+
+    # Request hold for 0.2s
+    client.post('/api/hold', json={'seconds': 0.2})
+
+    # Sleep slightly less than hold duration to verify freeze
+    time.sleep(0.15)
+    st2 = client.get('/api/status').get_json()
+    assert st2['index'] == idx_before
+
+    # After hold expires, it should resume progressing
+    time.sleep(0.15)
+    st3 = client.get('/api/status').get_json()
+    assert st3['index'] != idx_before

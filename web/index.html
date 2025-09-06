@@ -40,6 +40,7 @@
         <div class="row" style="gap: 8px;">
           <button id="toggle">Start</button>
           <button id="stop" class="secondary">Stop</button>
+          <button id="hold" class="secondary">Hold 3s</button>
           <button id="bookmark" class="secondary">Bookmark</button>
         </div>
       </div>
@@ -66,6 +67,7 @@
       const running = $('running');
       const toggle = $('toggle');
       const stop = $('stop');
+      const hold = $('hold');
       const bookmark = $('bookmark');
       let voiceOn = false;
       let lastSpokenFreq = null;
@@ -103,8 +105,13 @@
         await post('/api/stop');
         await getStatus();
       });
+      hold.addEventListener('click', async () => {
+        await post('/api/hold', { seconds: 3 });
+        await getStatus();
+      });
       bookmark.addEventListener('click', async () => {
-        const res = await post('/api/bookmark');
+        const note = prompt('Optional note/tag for this bookmark:') || undefined;
+        const res = await post('/api/bookmark', note ? { note } : undefined);
         // lightweight feedback
         bookmark.textContent = 'Bookmarked';
         setTimeout(() => (bookmark.textContent = 'Bookmark'), 900);
@@ -120,19 +127,49 @@
         }
       });
 
-      // Poll status 4x/sec
-      getStatus();
-      setInterval(async () => {
-        await getStatus();
-        if (!voiceOn || !window.speechSynthesis) return;
-        const f = freq.textContent;
-        if (f && f !== lastSpokenFreq && running.textContent === 'true') {
-          lastSpokenFreq = f;
-          const text = f.replace('MHz', ' mega hertz');
-          speechSynthesis.cancel();
-          speechSynthesis.speak(new SpeechSynthesisUtterance(text));
-        }
-      }, 250);
+      // Prefer SSE for low-latency updates; fall back to polling
+      function setupEvents() {
+        if (!('EventSource' in window)) return false;
+        try {
+          const es = new EventSource('/api/events');
+          es.addEventListener('status', (ev) => {
+            const j = JSON.parse(ev.data);
+            freq.textContent = j.current_freq_str || '—';
+            idx.textContent = j.index ?? 0;
+            total.textContent = j.total_freqs ?? 0;
+            dwell.textContent = (j.dwell_seconds ?? 0).toFixed(2);
+            running.textContent = j.running ? 'true' : 'false';
+            meta.textContent = `Dwell ${(+j.dwell_seconds).toFixed(2)}s • ${j.index+1}/${j.total_freqs}`;
+            toggle.textContent = j.running ? 'Pause' : 'Start';
+            pill.textContent = j.running ? (j.active ? 'Active' : 'Running') : 'Stopped';
+            pill.className = 'pill ' + (j.running ? 'on' : 'off');
+          });
+          es.addEventListener('activity', (ev) => {
+            if (!voiceOn || !window.speechSynthesis) return;
+            const d = JSON.parse(ev.data);
+            const text = String(d.freq || '').replace('MHz', ' mega hertz');
+            speechSynthesis.cancel();
+            speechSynthesis.speak(new SpeechSynthesisUtterance('Active ' + text + ', holding'));
+          });
+          return true;
+        } catch (_) { return false; }
+      }
+
+      if (!setupEvents()) {
+        // Poll status 4x/sec fallback
+        getStatus();
+        setInterval(async () => {
+          await getStatus();
+          if (!voiceOn || !window.speechSynthesis) return;
+          const f = freq.textContent;
+          if (f && f !== lastSpokenFreq && running.textContent === 'true') {
+            lastSpokenFreq = f;
+            const text = f.replace('MHz', ' mega hertz');
+            speechSynthesis.cancel();
+            speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+          }
+        }, 250);
+      }
     </script>
   </body>
   </html>
