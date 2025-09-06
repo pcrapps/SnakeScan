@@ -34,6 +34,13 @@
 - PRs should include: summary of changes, why, test results, and screenshots/GIFs for UI changes.
 - Update docs (`todo.md`, this file) when workflows or endpoints change.
 
+## Branch & PR Workflow (Required)
+- Never commit directly to `main`.
+- Create a feature branch per change: e.g., `feat/<topic>`, `fix/<topic>`, `docs/<topic>`.
+- Commit all changes to the branch; ensure `pytest -q` passes.
+- Push the branch and open a Pull Request targeting `main`.
+- In PRs, note any user-visible changes, ports, endpoints, and data files.
+
 ## Security & Configuration Tips
 - Default port: 8080. `bookmarks.csv` writes in repo root; ensure writable.
 - Don’t expose the Flask dev server publicly; use a reverse proxy if needed.
