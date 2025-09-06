@@ -42,6 +42,7 @@
           <button id="stop" class="secondary">Stop</button>
           <button id="hold" class="secondary">Hold 3s</button>
           <button id="bookmark" class="secondary">Bookmark</button>
+          <button id="geo" class="secondary">Geo OFF</button>
         </div>
       </div>
 
@@ -50,6 +51,8 @@
         <div class="stat"><div class="k">Total freqs</div><div class="v" id="total">0</div></div>
         <div class="stat"><div class="k">Dwell (s)</div><div class="v" id="dwell">0.50</div></div>
         <div class="stat"><div class="k">Running</div><div class="v" id="running">false</div></div>
+        <div class="stat"><div class="k">Hold</div><div class="v" id="holdrem">0.00</div></div>
+        <div class="stat"><div class="k">Location</div><div class="v" id="loc">—</div></div>
       </div>
 
       <footer>
@@ -65,10 +68,13 @@
       const total = $('total');
       const dwell = $('dwell');
       const running = $('running');
+      const holdrem = $('holdrem');
+      const loc = $('loc');
       const toggle = $('toggle');
       const stop = $('stop');
       const hold = $('hold');
       const bookmark = $('bookmark');
+      const geoBtn = $('geo');
       let voiceOn = false;
       let lastSpokenFreq = null;
       const pill = $('status-pill');
@@ -111,7 +117,8 @@
       });
       bookmark.addEventListener('click', async () => {
         const note = prompt('Optional note/tag for this bookmark:') || undefined;
-        const res = await post('/api/bookmark', note ? { note } : undefined);
+        const payload = note ? { note } : undefined;
+        const res = await post('/api/bookmark', payload);
         // lightweight feedback
         bookmark.textContent = 'Bookmarked';
         setTimeout(() => (bookmark.textContent = 'Bookmark'), 900);
@@ -139,6 +146,12 @@
             total.textContent = j.total_freqs ?? 0;
             dwell.textContent = (j.dwell_seconds ?? 0).toFixed(2);
             running.textContent = j.running ? 'true' : 'false';
+            holdrem.textContent = (j.hold_remaining ?? 0).toFixed(2);
+            if (j.location) {
+              const lat = (+j.location.lat).toFixed(5);
+              const lon = (+j.location.lon).toFixed(5);
+              loc.textContent = `${lat}, ${lon}`;
+            }
             meta.textContent = `Dwell ${(+j.dwell_seconds).toFixed(2)}s • ${j.index+1}/${j.total_freqs}`;
             toggle.textContent = j.running ? 'Pause' : 'Start';
             pill.textContent = j.running ? (j.active ? 'Active' : 'Running') : 'Stopped';
@@ -170,6 +183,35 @@
           }
         }, 250);
       }
+
+      // Geo (optional): request browser location and send to server
+      let geoWatchId = null;
+      function geoOn() {
+        if (!('geolocation' in navigator)) return alert('No geolocation available');
+        geoBtn.textContent = 'Geo ON';
+        geoWatchId = navigator.geolocation.watchPosition((pos) => {
+          const c = pos.coords || {};
+          post('/api/geo', {
+            lat: c.latitude,
+            lon: c.longitude,
+            accuracy: c.accuracy,
+            speed: c.speed,
+            heading: c.heading
+          }).catch(()=>{});
+        }, (err) => {
+          console.warn('geo error', err);
+        }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 8000 });
+      }
+      function geoOff() {
+        geoBtn.textContent = 'Geo OFF';
+        if (geoWatchId != null && navigator.geolocation) {
+          navigator.geolocation.clearWatch(geoWatchId);
+        }
+        geoWatchId = null;
+      }
+      geoBtn.addEventListener('click', () => {
+        if (geoWatchId == null) geoOn(); else geoOff();
+      });
     </script>
   </body>
   </html>

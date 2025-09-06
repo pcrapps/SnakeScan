@@ -40,6 +40,8 @@ class ScannerState:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _stop_event: threading.Event = field(default_factory=threading.Event)
     _kick_event: threading.Event = field(default_factory=threading.Event)
+    # Latest client-provided location (optional)
+    last_location: dict | None = None
 
     def start(self):
         with self._lock:
@@ -117,7 +119,7 @@ def index():
 @app.get("/api/status")
 def api_status():
     hold_remaining = max(0.0, state._hold_until_ts - time.time()) if state._hold_until_ts else 0.0
-    return jsonify(
+    payload = dict(
         running=state.running,
         current_freq_hz=state.current_freq_hz,
         current_freq_str=freq_to_str_hz(state.current_freq_hz),
@@ -128,6 +130,9 @@ def api_status():
         hold_seconds=state.hold_seconds,
         hold_remaining=round(hold_remaining, 3),
     )
+    if state.last_location:
+        payload["location"] = state.last_location
+    return jsonify(payload)
 
 
 @app.post("/api/start")
@@ -216,7 +221,7 @@ def api_events():
 def api_bookmark():
     # Append current freq with timestamp to bookmarks.csv
     row = {
-        "timestamp": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         "freq_hz": state.current_freq_hz,
         "freq_str": freq_to_str_hz(state.current_freq_hz),
         "index": state.current_index,
@@ -225,9 +230,32 @@ def api_bookmark():
         note = request.json.get("note")
         if isinstance(note, str) and note.strip():
             row["note"] = note.strip()
+    # Attach last known location if available (or accept from payload override)
+    if request.is_json:
+        loc = request.json.get("location")
+        if isinstance(loc, dict) and "lat" in loc and "lon" in loc:
+            state.last_location = {
+                "lat": float(loc.get("lat")),
+                "lon": float(loc.get("lon")),
+                "accuracy": float(loc.get("accuracy", 0) or 0),
+                "speed": float(loc.get("speed", 0) or 0),
+                "heading": float(loc.get("heading", 0) or 0),
+                "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+            }
+    if state.last_location:
+        row.update({
+            "lat": state.last_location.get("lat"),
+            "lon": state.last_location.get("lon"),
+            "accuracy": state.last_location.get("accuracy"),
+            "speed": state.last_location.get("speed"),
+            "heading": state.last_location.get("heading"),
+        })
+
     header = ["timestamp", "freq_hz", "freq_str", "index"]
     if "note" in row:
         header.append("note")
+    if state.last_location:
+        header.extend(["lat", "lon", "accuracy", "speed", "heading"])
     with _io_lock:
         new_file = not _BOOKMARKS.exists()
         with _BOOKMARKS.open("a", newline="") as f:
@@ -253,6 +281,27 @@ def api_bookmarks():
         except Exception:
             pass
     return jsonify(items=items)
+
+
+@app.post("/api/geo")
+def api_geo_update():
+    if not request.is_json:
+        return jsonify(ok=False, error="Expected JSON"), 400
+    data = request.json or {}
+    try:
+        lat = float(data.get("lat"))
+        lon = float(data.get("lon"))
+    except Exception:
+        return jsonify(ok=False, error="Invalid lat/lon"), 400
+    state.last_location = {
+        "lat": lat,
+        "lon": lon,
+        "accuracy": float(data.get("accuracy") or 0),
+        "speed": float(data.get("speed") or 0),
+        "heading": float(data.get("heading") or 0),
+        "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+    }
+    return jsonify(ok=True, location=state.last_location)
 
 
 if __name__ == "__main__":

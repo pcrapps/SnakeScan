@@ -20,6 +20,7 @@ The server listens on `http://0.0.0.0:8080` (open from the same device: `http://
 - Stop: pauses scanning (index/frequency stays put).
 - Bookmark: saves the current frequency with a UTC timestamp to `bookmarks.csv`.
 - Voice alerts: double‑tap the frequency readout to toggle; the browser will speak the current frequency as it changes.
+ - Geotagging (optional): click the "Geo OFF" button to enable location from your browser (phone recommended for GPS). Bookmarks and status will include lat/lon.
 
 Notes
 - Bookmarks are appended to `bookmarks.csv` in the repo root.
