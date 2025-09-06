@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SnakeScan – 2m Band Scanner</title>
+    <style>
+      :root { --bg: #0b0f14; --card: #121821; --ink: #e8f0ff; --muted: #9bb0ca; --accent: #4cc9f0; --ok: #7ee787; --warn: #f2cc60; }
+      * { box-sizing: border-box; }
+      body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--ink); display: grid; place-items: center; min-height: 100vh; }
+      .card { background: var(--card); padding: 24px; border-radius: 12px; width: min(680px, 92vw); box-shadow: 0 10px 30px rgba(0,0,0,0.35); }
+      h1 { margin: 0 0 16px; font-size: 22px; font-weight: 600; letter-spacing: 0.2px; }
+      .row { display: flex; gap: 16px; align-items: center; justify-content: space-between; }
+      .freq { font-variant-numeric: tabular-nums; font-size: 40px; font-weight: 700; letter-spacing: 0.5px; }
+      .meta { color: var(--muted); font-size: 13px; }
+      button { appearance: none; border: 0; border-radius: 10px; padding: 12px 16px; font-size: 16px; font-weight: 600; cursor: pointer; color: #061017; background: var(--accent); }
+      button.secondary { background: #243041; color: var(--ink); }
+      .pill { display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+      .pill.on { background: rgba(126,231,135,0.15); color: var(--ok); }
+      .pill.off { background: rgba(242,204,96,0.15); color: var(--warn); }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+      .stat { background: #0e141c; border-radius: 10px; padding: 12px; }
+      .stat .k { color: var(--muted); font-size: 12px; }
+      .stat .v { font-variant-numeric: tabular-nums; font-weight: 700; }
+      footer { margin-top: 16px; color: var(--muted); font-size: 12px; text-align: right; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>📡 SnakeScan – 2m Band</h1>
+      <div class="row" style="margin-bottom: 12px;">
+        <div>
+          <div id="freq" class="freq">144.000 MHz</div>
+          <div class="meta">
+            <span id="status-pill" class="pill off">Stopped</span>
+            <span>•</span>
+            <span id="meta">Dwell 0.50s • 0/0</span>
+          </div>
+        </div>
+        <div class="row" style="gap: 8px;">
+          <button id="toggle">Start</button>
+          <button id="stop" class="secondary">Stop</button>
+          <button id="bookmark" class="secondary">Bookmark</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="stat"><div class="k">Current index</div><div class="v" id="idx">0</div></div>
+        <div class="stat"><div class="k">Total freqs</div><div class="v" id="total">0</div></div>
+        <div class="stat"><div class="k">Dwell (s)</div><div class="v" id="dwell">0.50</div></div>
+        <div class="stat"><div class="k">Running</div><div class="v" id="running">false</div></div>
+      </div>
+
+      <footer>
+        Basic demo UI – updates ~4×/sec
+      </footer>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const freq = $('freq');
+      const meta = $('meta');
+      const idx = $('idx');
+      const total = $('total');
+      const dwell = $('dwell');
+      const running = $('running');
+      const toggle = $('toggle');
+      const stop = $('stop');
+      const bookmark = $('bookmark');
+      let voiceOn = false;
+      let lastSpokenFreq = null;
+      const pill = $('status-pill');
+
+      async function getStatus() {
+        const res = await fetch('/api/status', { cache: 'no-store' });
+        if (!res.ok) return;
+        const j = await res.json();
+        freq.textContent = j.current_freq_str || '—';
+        idx.textContent = j.index ?? 0;
+        total.textContent = j.total_freqs ?? 0;
+        dwell.textContent = (j.dwell_seconds ?? 0).toFixed(2);
+        running.textContent = j.running ? 'true' : 'false';
+        meta.textContent = `Dwell ${(+j.dwell_seconds).toFixed(2)}s • ${j.index+1}/${j.total_freqs}`;
+        toggle.textContent = j.running ? 'Pause' : 'Start';
+        pill.textContent = j.running ? 'Running' : 'Stopped';
+        pill.className = 'pill ' + (j.running ? 'on' : 'off');
+      }
+
+      async function post(url, body) {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: body ? JSON.stringify(body) : null,
+        });
+        return res.json();
+      }
+
+      toggle.addEventListener('click', async () => {
+        await post('/api/toggle');
+        await getStatus();
+      });
+      stop.addEventListener('click', async () => {
+        await post('/api/stop');
+        await getStatus();
+      });
+      bookmark.addEventListener('click', async () => {
+        const res = await post('/api/bookmark');
+        // lightweight feedback
+        bookmark.textContent = 'Bookmarked';
+        setTimeout(() => (bookmark.textContent = 'Bookmark'), 900);
+      });
+
+      // Voice toggle via double-tap on the frequency display
+      freq.addEventListener('dblclick', () => {
+        voiceOn = !voiceOn;
+        freq.style.textDecoration = voiceOn ? 'underline' : '';
+        if (voiceOn && window.speechSynthesis) {
+          const u = new SpeechSynthesisUtterance('Voice alerts on');
+          speechSynthesis.speak(u);
+        }
+      });
+
+      // Poll status 4x/sec
+      getStatus();
+      setInterval(async () => {
+        await getStatus();
+        if (!voiceOn || !window.speechSynthesis) return;
+        const f = freq.textContent;
+        if (f && f !== lastSpokenFreq && running.textContent === 'true') {
+          lastSpokenFreq = f;
+          const text = f.replace('MHz', ' mega hertz');
+          speechSynthesis.cancel();
+          speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+        }
+      }, 250);
+    </script>
+  </body>
+  </html>
