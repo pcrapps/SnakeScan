@@ -4,17 +4,18 @@ A focused backlog to evolve SnakeScan into a safe, mobile, in‑car SDR scanner 
 
 ## Short Term
 - Wire backend to real RTL‑SDR scanning engine (RMS, squelch, HOLD)
-- Speak only on activity: “Active 146.940 megahertz, holding”
+- Speak only on activity: “Active 146.940 megahertz, holding” [DONE 2025-09-06T07:25Z]
 - Big, glove‑friendly controls: Start/Pause, Hold, Priority star
-- Bookmark enhancements: tags/notes, quick undo, CSV/JSON export
-- SSE/WebSocket status events (replace polling)
-- requirements.txt and systemd unit for auto‑start
+- Bookmark enhancements: tags/notes, quick undo, CSV/JSON export (notes + JSON done 2025-09-06T07:25Z)
+- SSE/WebSocket status events (replace polling) [DONE 2025-09-06T07:25Z]
+- requirements.txt [DONE 2025-09-06T07:25Z]
+- systemd unit for auto‑start
 
 ## Scanner Engine
 - Adaptive squelch: rolling noise floor per channel/segment
 - Priority + lockout lists; memory banks (repeaters/simplex)
 - Band presets + step sizes (2m/70cm/airband/weather)
-- HOLD behavior: configurable hang‑time and resume strategy
+- HOLD behavior: configurable hang‑time and resume strategy [DONE 2025-09-06T07:25Z]
 - PPM auto‑calibration using NOAA 162.55 MHz or known repeaters
 - Gain strategy: manual/AGC off; probe multiple gains on suspected hits
 - NFM and de‑emphasis options; tone decode (CTCSS/DCS) for repeaters
@@ -23,7 +24,7 @@ A focused backlog to evolve SnakeScan into a safe, mobile, in‑car SDR scanner 
 - Live spectrum/waterfall (FFT) with peak markers; click‑to‑tune
 - Audio streaming to browser (WebRTC/Opus or chunked WAV)
 - Events pane: recent hits with duration, RMS, play snippet, Bookmark
-- Voice alerts toggle control + activity‑specific phrases
+- Voice alerts toggle control + activity‑specific phrases [DONE 2025-09-06T07:25Z]
 - Preset selector, dwell slider, step size, gain/squelch controls
 - “Driving mode” layout: minimal info, large buttons, dark high‑contrast
 
@@ -48,7 +49,7 @@ A focused backlog to evolve SnakeScan into a safe, mobile, in‑car SDR scanner 
 - Smart dwell: shorter on quiet channels, longer near activity spikes
 
 ## Packaging
-- requirements.txt and pinned versions
+- requirements.txt and pinned versions (requirements.txt done 2025-09-06T07:25Z)
 - Optional Dockerfile for x86/arm builds
 - Simple setup docs for macOS/Linux/Raspberry Pi
 
