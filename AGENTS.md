@@ -11,7 +11,7 @@
 
 ## Build, Test, and Development Commands
 - Install deps: `python3 -m pip install -U pip && python3 -m pip install flask pytest numpy`
-- Run UI: `python3 scanner_frontend.py` (serves on `http://localhost:5000`).
+- Run UI: `python3 scanner_frontend.py` (serves on `http://localhost:8080`).
 - Run simulator: `python3 simulate_scanner.py`.
 - Run legacy scanner: `python3 main.py`.
 - Tests: `pytest -q` (API/unit tests pass without RTL-SDR; hardware tests may require rtl_* tools).
@@ -35,7 +35,7 @@
 - Update docs (`todo.md`, this file) when workflows or endpoints change.
 
 ## Security & Configuration Tips
-- Default port: 5000. `bookmarks.csv` writes in repo root; ensure writable.
+- Default port: 8080. `bookmarks.csv` writes in repo root; ensure writable.
 - Don’t expose the Flask dev server publicly; use a reverse proxy if needed.
 - On Raspberry Pi, prefer a systemd unit for auto-start and watchdog behavior.
 
