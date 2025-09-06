@@ -21,7 +21,7 @@ The server listens on `http://0.0.0.0:8080` (open from the same device: `http://
 - Hold: freeze on current frequency for N seconds (default 3s).
 - Bookmark: saves current frequency with timestamp (and optional note) to `bookmarks.csv`.
 - Voice alerts: double‑tap the frequency readout to toggle speaking frequency/activity.
- - Geotagging (optional): click the "Geo OFF" button to enable location from your browser (phone recommended for GPS). Bookmarks and status will include lat/lon.
+- Geotagging (optional): click the "Geo OFF" button to enable location from your browser (phone recommended for GPS). Bookmarks and status will include lat/lon.
 
 Notes
 - Bookmarks are appended to `bookmarks.csv` in the repo root.
@@ -32,6 +32,15 @@ Run all tests (UI/API work without RTL‑SDR):
 ```
 pytest -q
 ```
+
+## Screenshots
+Below are reference screenshots. Replace with your own captures as the UI evolves.
+
+Main UI (running):
+![Main UI](docs/screenshots/ui-main.png)
+
+With geotagging enabled and hold active:
+![Geo + Hold](docs/screenshots/ui-geo-hold.png)
 
 ## Optional Scripts
 - Simulated activity (no hardware):
