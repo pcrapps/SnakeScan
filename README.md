@@ -6,7 +6,7 @@ Minimal web UI for mobile SDR scanning of the 2m ham band. Shows the currently s
 1) Install Python deps
 ```
 python3 -m pip install -U pip
-python3 -m pip install flask pytest numpy
+python3 -m pip install -r requirements.txt
 ```
 
 2) Run the frontend

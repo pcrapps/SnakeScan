@@ -1,0 +1,9 @@
+# Core runtime
+Flask>=2.3,<3.0
+numpy>=1.24,<3.0
+
+# Test-only (optional for deployment)
+pytest>=7.0,<9.0
+
+# Optional: RTL-SDR Python bindings (not required for web UI)
+# pyrtlsdr>=0.3
