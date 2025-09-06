@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, field
 from typing import List
 
-from flask import Flask, jsonify, request, send_from_directory, Response
+from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 import csv
 import datetime as _dt
 import pathlib
@@ -176,16 +176,40 @@ def _sse_format(event: str, data: dict) -> str:
 
 @app.get("/api/events")
 def api_events():
+    def _status_snapshot() -> dict:
+        hold_remaining = max(0.0, state._hold_until_ts - time.time()) if state._hold_until_ts else 0.0
+        return {
+            "running": state.running,
+            "current_freq_hz": state.current_freq_hz,
+            "current_freq_str": freq_to_str_hz(state.current_freq_hz),
+            "dwell_seconds": state.dwell_seconds,
+            "total_freqs": len(state.freqs),
+            "index": state.current_index,
+            "active": state.active,
+            "hold_seconds": state.hold_seconds,
+            "hold_remaining": round(hold_remaining, 3),
+        }
+
     def stream():
-        # Emit periodic status updates
+        # Emit periodic status updates; include heartbeat comments to avoid buffering
+        heartbeat = 0
         while True:
-            st = api_status().json
+            st = _status_snapshot()
             yield _sse_format("status", st)
-            # If active and not previously reported, also emit activity event
             if st.get("active"):
                 yield _sse_format("activity", {"freq": st["current_freq_str"], "index": st["index"]})
+            heartbeat += 1
+            if heartbeat % 8 == 0:
+                # Comment event to nudge proxies/buffers
+                yield ": keep-alive\n\n"
             time.sleep(0.25)
-    return Response(stream(), mimetype="text/event-stream")
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return Response(stream_with_context(stream()), mimetype="text/event-stream", headers=headers)
 
 
 @app.post("/api/bookmark")
