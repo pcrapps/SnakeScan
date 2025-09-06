@@ -156,5 +156,5 @@ def api_bookmarks():
 
 
 if __name__ == "__main__":
-    # Start in stopped state; visit http://localhost:5000 to control
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    # Start in stopped state; visit http://localhost:8080 to control
+    app.run(host="0.0.0.0", port=8080, debug=False)

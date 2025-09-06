@@ -13,7 +13,7 @@ python3 -m pip install -r requirements.txt
 ```
 python3 scanner_frontend.py
 ```
-The server listens on `http://0.0.0.0:5000` (open from the same device: `http://localhost:5000`).
+The server listens on `http://0.0.0.0:8080` (open from the same device: `http://localhost:8080`).
 
 ## Using the UI
 - Start: begins looping 144–148 MHz in 25 kHz steps.
