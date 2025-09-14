@@ -18,7 +18,7 @@
       .pill { display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
       .pill.on { background: rgba(126,231,135,0.15); color: var(--ok); }
       .pill.off { background: rgba(242,204,96,0.15); color: var(--warn); }
-      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; margin-top: 16px; }
       .stat { background: #0e141c; border-radius: 10px; padding: 12px; }
       .stat .k { color: var(--muted); font-size: 12px; }
       .stat .v { font-variant-numeric: tabular-nums; font-weight: 700; }
@@ -53,6 +53,8 @@
         <div class="stat"><div class="k">Running</div><div class="v" id="running">false</div></div>
         <div class="stat"><div class="k">Hold</div><div class="v" id="holdrem">0.00</div></div>
         <div class="stat"><div class="k">Location</div><div class="v" id="loc">—</div></div>
+        <div class="stat"><div class="k">Grid Square</div><div class="v" id="grid">—</div></div>
+        <div class="stat"><div class="k">GPS Accuracy</div><div class="v" id="accuracy">—</div></div>
       </div>
 
       <footer>
@@ -70,6 +72,8 @@
       const running = $('running');
       const holdrem = $('holdrem');
       const loc = $('loc');
+      const grid = $('grid');
+      const accuracy = $('accuracy');
       const toggle = $('toggle');
       const stop = $('stop');
       const hold = $('hold');
@@ -151,6 +155,12 @@
               const lat = (+j.location.lat).toFixed(5);
               const lon = (+j.location.lon).toFixed(5);
               loc.textContent = `${lat}, ${lon}`;
+              grid.textContent = j.location.grid_square || '—';
+              accuracy.textContent = j.location.accuracy ? `${(+j.location.accuracy).toFixed(0)}m` : '—';
+            } else {
+              loc.textContent = '—';
+              grid.textContent = '—';
+              accuracy.textContent = '—';
             }
             meta.textContent = `Dwell ${(+j.dwell_seconds).toFixed(2)}s • ${j.index+1}/${j.total_freqs}`;
             toggle.textContent = j.running ? 'Pause' : 'Start';

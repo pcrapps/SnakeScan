@@ -10,10 +10,16 @@ python3 -m pip install -r requirements.txt
 ```
 
 2) Run the frontend
+**Recommended (automatic cleanup):**
+```bash
+./start_scanner.sh
 ```
+
+**Or manually:**
+```bash
 python3 scanner_frontend.py
 ```
-The server listens on `http://0.0.0.0:8080` (open from the same device: `http://localhost:8080`).
+The server automatically terminates any existing scanner processes on startup and listens on `http://0.0.0.0:8080` (open from the same device: `http://localhost:8080`).
 
 ## Using the UI
 - Start: begins looping 144–148 MHz in 25 kHz steps.
@@ -21,7 +27,11 @@ The server listens on `http://0.0.0.0:8080` (open from the same device: `http://
 - Hold: freeze on current frequency for N seconds (default 3s).
 - Bookmark: saves current frequency with timestamp (and optional note) to `bookmarks.csv`.
 - Voice alerts: double‑tap the frequency readout to toggle speaking frequency/activity.
-- Geotagging (optional): click the "Geo OFF" button to enable location from your browser (phone recommended for GPS). Bookmarks and status will include lat/lon.
+- **Enhanced GPS logging**: click the "Geo OFF" button to enable location from your browser (phone recommended for GPS). Features:
+  - Automatic Maidenhead grid square calculation (ham radio standard)
+  - GPS accuracy filtering (rejects data >100m accuracy)
+  - Real-time grid square and accuracy display
+  - Complete GPS data in CSV logs (lat/lon/grid/accuracy/speed/heading)
 
 Notes
 - Bookmarks are appended to `bookmarks.csv` in the repo root.

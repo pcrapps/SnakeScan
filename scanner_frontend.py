@@ -3,11 +3,67 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import List
+import subprocess
+import sys
+import os
 
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 import csv
 import datetime as _dt
 import pathlib
+
+
+# ----- GPS Utilities -----
+def lat_lon_to_maidenhead(lat: float, lon: float) -> str:
+    """Convert latitude/longitude to Maidenhead grid square (6-character)"""
+    lon += 180
+    lat += 90
+
+    field_lon = int(lon / 20)
+    field_lat = int(lat / 10)
+    square_lon = int((lon % 20) / 2)
+    square_lat = int(lat % 10)
+    subsquare_lon = int(((lon % 20) % 2) * 12)
+    subsquare_lat = int(((lat % 10) % 1) * 24)
+
+    return (chr(ord('A') + field_lon) + chr(ord('A') + field_lat) +
+            str(square_lon) + str(square_lat) +
+            chr(ord('a') + subsquare_lon) + chr(ord('a') + subsquare_lat))
+
+
+def validate_gps_location(location_data: dict) -> dict | None:
+    """Validate and clean GPS location data from browser"""
+    if not location_data or 'lat' not in location_data or 'lon' not in location_data:
+        return None
+
+    try:
+        lat = float(location_data['lat'])
+        lon = float(location_data['lon'])
+
+        # Basic coordinate validation
+        if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+            return None
+
+        # Accuracy filtering - reject if accuracy > 100m
+        accuracy = location_data.get('accuracy')
+        if accuracy and float(accuracy) > 100:
+            return None
+
+        cleaned = {
+            'lat': round(lat, 6),
+            'lon': round(lon, 6),
+            'grid_square': lat_lon_to_maidenhead(lat, lon),
+            'timestamp': _dt.datetime.now(_dt.timezone.utc).isoformat(timespec='seconds')
+        }
+
+        # Optional fields
+        for field in ['accuracy', 'altitude', 'speed', 'heading']:
+            if field in location_data and location_data[field] is not None:
+                cleaned[field] = round(float(location_data[field]), 2)
+
+        return cleaned
+    except (ValueError, TypeError):
+        return None
 
 
 # ----- Scanner Core (simple frequency loop) -----
@@ -246,16 +302,18 @@ def api_bookmark():
         row.update({
             "lat": state.last_location.get("lat"),
             "lon": state.last_location.get("lon"),
+            "grid_square": state.last_location.get("grid_square"),
             "accuracy": state.last_location.get("accuracy"),
             "speed": state.last_location.get("speed"),
             "heading": state.last_location.get("heading"),
+            "gps_timestamp": state.last_location.get("timestamp"),
         })
 
     header = ["timestamp", "freq_hz", "freq_str", "index"]
     if "note" in row:
         header.append("note")
     if state.last_location:
-        header.extend(["lat", "lon", "accuracy", "speed", "heading"])
+        header.extend(["lat", "lon", "grid_square", "accuracy", "speed", "heading", "gps_timestamp"])
     with _io_lock:
         new_file = not _BOOKMARKS.exists()
         with _BOOKMARKS.open("a", newline="") as f:
@@ -287,23 +345,48 @@ def api_bookmarks():
 def api_geo_update():
     if not request.is_json:
         return jsonify(ok=False, error="Expected JSON"), 400
+
     data = request.json or {}
-    try:
-        lat = float(data.get("lat"))
-        lon = float(data.get("lon"))
-    except Exception:
-        return jsonify(ok=False, error="Invalid lat/lon"), 400
-    state.last_location = {
-        "lat": lat,
-        "lon": lon,
-        "accuracy": float(data.get("accuracy") or 0),
-        "speed": float(data.get("speed") or 0),
-        "heading": float(data.get("heading") or 0),
-        "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
-    }
+    validated_location = validate_gps_location(data)
+
+    if not validated_location:
+        return jsonify(ok=False, error="Invalid or inaccurate GPS data"), 400
+
+    state.last_location = validated_location
     return jsonify(ok=True, location=state.last_location)
 
 
+def cleanup_existing_processes():
+    """Kill any existing scanner_frontend.py processes to prevent conflicts"""
+    try:
+        current_pid = os.getpid()
+        result = subprocess.run(['pgrep', '-f', 'scanner_frontend.py'],
+                              capture_output=True, text=True)
+        if result.returncode == 0:
+            pids = result.stdout.strip().split('\n')
+            for pid_str in pids:
+                if pid_str and pid_str.isdigit():
+                    pid = int(pid_str)
+                    if pid != current_pid:  # Don't kill ourselves
+                        try:
+                            os.kill(pid, 15)  # SIGTERM
+                            print(f"Terminated existing scanner process: {pid}")
+                        except ProcessLookupError:
+                            pass  # Process already gone
+        time.sleep(1)  # Brief pause to let processes clean up
+    except Exception as e:
+        print(f"Warning: Could not cleanup existing processes: {e}")
+
+
 if __name__ == "__main__":
+    print("SnakeScan starting...")
+    cleanup_existing_processes()
+    print("Starting scanner on http://localhost:8080")
     # Start in stopped state; visit http://localhost:8080 to control
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    try:
+        app.run(host="0.0.0.0", port=8080, debug=False)
+    except KeyboardInterrupt:
+        print("\nShutting down scanner...")
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)

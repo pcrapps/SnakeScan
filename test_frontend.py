@@ -4,6 +4,46 @@ import time
 import scanner_frontend as sf
 
 
+def test_maidenhead_grid_square():
+    """Test Maidenhead grid square calculation"""
+    # Test San Francisco coordinates
+    grid = sf.lat_lon_to_maidenhead(37.7749, -122.4194)
+    assert grid == 'CM87ss'  # Corrected expected value
+
+    # Test other known locations
+    grid_london = sf.lat_lon_to_maidenhead(51.5074, -0.1278)
+    assert grid_london == 'IO91wm'
+
+    # Test zero coordinates (equator/prime meridian)
+    grid_zero = sf.lat_lon_to_maidenhead(0.0, 0.0)
+    assert grid_zero == 'JJ00aa'
+
+
+def test_gps_validation():
+    """Test GPS location validation and filtering"""
+    # Valid location
+    valid_loc = {'lat': 37.7749, 'lon': -122.4194, 'accuracy': 10.5}
+    result = sf.validate_gps_location(valid_loc)
+    assert result is not None
+    assert result['grid_square'] == 'CM87ss'
+    assert result['accuracy'] == 10.5
+
+    # Invalid coordinates
+    invalid_coords = [
+        {'lat': 91, 'lon': 0},  # lat out of range
+        {'lat': 0, 'lon': 181}, # lon out of range
+        {'lat': 'invalid', 'lon': 0}, # non-numeric
+        {'lon': -122.4194}, # missing lat
+    ]
+
+    for invalid in invalid_coords:
+        assert sf.validate_gps_location(invalid) is None
+
+    # Poor accuracy (should be filtered out)
+    poor_accuracy = {'lat': 37.7749, 'lon': -122.4194, 'accuracy': 150}
+    assert sf.validate_gps_location(poor_accuracy) is None
+
+
 def _wait_until(fn, timeout=1.5, interval=0.02):
     """Poll fn() until it returns truthy or timeout seconds elapse."""
     start = time.time()
@@ -93,6 +133,48 @@ def test_root_serves_html():
     assert resp.status_code == 200
     body = resp.data.decode('utf-8').lower()
     assert '<html' in body and 'snakescan' in body
+
+
+def test_geo_then_bookmark(tmp_path, monkeypatch):
+    import scanner_frontend as sf_mod
+    bm = tmp_path / 'bookmarks.csv'
+    monkeypatch.setattr(sf_mod, '_BOOKMARKS', bm)
+
+    app = sf_mod.app
+    client = app.test_client()
+
+    # Post a location, then bookmark
+    loc = { 'lat': 37.7749, 'lon': -122.4194, 'accuracy': 5.5, 'speed': 0, 'heading': 180 }
+    r = client.post('/api/geo', json=loc)
+    assert r.status_code == 200
+    gps_data = r.get_json()
+    assert gps_data['ok'] is True
+
+    # Verify enhanced GPS data structure
+    loc_data = gps_data['location']
+    assert abs(loc_data['lat'] - 37.7749) < 1e-6
+    assert abs(loc_data['lon'] + 122.4194) < 1e-3
+    assert 'grid_square' in loc_data
+    assert loc_data['grid_square'] == 'CM87ss'  # SF grid square
+    assert loc_data['accuracy'] == 5.5
+
+    # Ensure location appears in status
+    st = client.get('/api/status').get_json()
+    assert 'location' in st and abs(st['location']['lat'] - 37.7749) < 1e-6
+    assert st['location']['grid_square'] == 'CM87ss'
+
+    # Create bookmark and verify lat/lon persisted
+    b = client.post('/api/bookmark', json={'note': 'geo test'}).get_json()
+    assert b['ok'] is True
+    assert abs(b['lat'] - 37.7749) < 1e-6
+    assert abs(b['lon'] + 122.4194) < 1e-3
+    assert b['grid_square'] == 'CM87ss'
+
+    # Fetch bookmarks
+    data = client.get('/api/bookmarks').get_json()
+    assert len(data['items']) == 1
+    it = data['items'][0]
+    assert 'lat' in it and 'lon' in it
 
 
 def test_bookmark_flow(tmp_path, monkeypatch):
