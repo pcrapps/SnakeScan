@@ -1,6 +1,6 @@
 # SnakeScan
 
-Mobile‑friendly web UI for SDR scanning of the 2m ham band. Live updates via SSE, start/stop + hold controls, optional geotagging, and quick bookmarks (with notes) designed for eyes‑off use.
+Mobile‑friendly web UI for SDR scanning of the 2m ham band. Live updates via SSE, start/stop + hold controls, RTL-SDR hardware support with RMS activity detection, optional geotagging with Maidenhead grid squares, and quick bookmarks (with notes) designed for eyes‑off use.
 
 ## Quick Start
 1) Install Python deps
@@ -35,7 +35,9 @@ The server automatically terminates any existing scanner processes on startup an
 
 Notes
 - Bookmarks are appended to `bookmarks.csv` in the repo root.
+- Activity hits are auto-logged to a timestamped `activity_YYYYMMDD_HHMMSS.csv` per session.
 - Live updates use Server‑Sent Events (SSE). If SSE is unavailable, the UI falls back to polling ~4×/sec.
+- When RTL-SDR hardware (`rtl_fm`) is detected, real FM audio is sampled and activity is detected via RMS thresholding. Without hardware the scanner runs in silent fallback mode (no crashes).
 
 ## Tests
 Run all tests (UI/API work without RTL‑SDR):
@@ -63,8 +65,7 @@ python3 main.py
 ```
 
 ## Next Steps (Roadmap)
-- Integrate real RTL‑SDR scanning (RMS, squelch, HOLD) into the web backend.
-- “Driving Mode” layout with larger controls; priority/lockout channels.
+- "Driving Mode" layout with larger controls; priority/lockout channels.
 - Stream audio to the browser (WebRTC/Opus) and log activity with clips.
 - Adaptive squelch and wideband pre‑scan to speed up hit detection.
 - GPS tagging improvements and geofenced scan lists. See `todo.md`.
@@ -73,7 +74,7 @@ python3 main.py
 This uses Flask’s dev server for local/LAN use on port 8080. Do not expose it directly to the internet. Prefer a reverse proxy if remote access is needed.
 
 ## API Summary
-- `GET /api/status` — current status (running, frequency/index, dwell, hold_remaining, optional location)
+- `GET /api/status` — current status (running, frequency/index, dwell, hold_remaining, hit_count, unique_freq_count, rms, sdr_available, optional location)
 - `POST /api/start` — start scanning; body: `{ dwell_seconds? }`
 - `POST /api/stop` — stop scanning
 - `POST /api/toggle` — toggle running state

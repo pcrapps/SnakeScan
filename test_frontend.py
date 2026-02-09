@@ -3,6 +3,9 @@ import time
 
 import scanner_frontend as sf
 
+# Disable RTL-SDR hardware for all tests (avoids subprocess overhead)
+sf.state._rtl_available = False
+
 
 def test_maidenhead_grid_square():
     """Test Maidenhead grid square calculation"""
@@ -231,3 +234,72 @@ def test_hold_freezes_index():
     time.sleep(0.15)
     st3 = client.get('/api/status').get_json()
     assert st3['index'] != idx_before
+
+
+def test_status_includes_hit_stats():
+    """New hit_count, unique_freq_count, rms, sdr_available fields in /api/status."""
+    client = sf.app.test_client()
+    st = client.get('/api/status').get_json()
+    assert 'hit_count' in st
+    assert 'unique_freq_count' in st
+    assert 'rms' in st
+    assert 'sdr_available' in st
+    assert isinstance(st['hit_count'], int)
+    assert isinstance(st['unique_freq_count'], int)
+    assert isinstance(st['rms'], float)
+
+
+def test_activity_log_written_on_hit(tmp_path, monkeypatch):
+    """When force_active_indices triggers a hit, activity CSV is written."""
+    import csv
+    import scanner_frontend as sf_mod
+
+    log_path = tmp_path / "test_activity.csv"
+    sf_mod.state.stop()
+    sf_mod.state.hold_seconds = 0.0
+
+    client = sf_mod.app.test_client()
+    # Start first (which resets activity_log_path), then apply test overrides
+    client.post('/api/start', json={'dwell_seconds': 0.03})
+    sf_mod.state.activity_log_path = log_path
+    sf_mod.state.current_index = 5
+    sf_mod.state.force_active_indices = {5}
+    time.sleep(0.2)
+    client.post('/api/stop')
+
+    # Clean up test hook
+    sf_mod.state.force_active_indices = set()
+
+    assert log_path.exists(), "Activity log was not created"
+    with log_path.open() as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    assert len(rows) >= 1
+    assert int(rows[0]['freq_hz']) == sf_mod.state.freqs[5]
+    assert float(rows[0]['rms']) > 0
+
+
+def test_rtl_fallback_no_hardware():
+    """Without rtl_fm, scanner runs in fallback mode (no crashes)."""
+    import scanner_frontend as sf_mod
+
+    sf_mod.state.stop()
+    sf_mod.state._rtl_available = False
+    sf_mod.state.force_active_indices = set()
+    sf_mod.state.dwell_seconds = 0.02
+
+    client = sf_mod.app.test_client()
+    client.post('/api/start', json={'dwell_seconds': 0.02})
+    time.sleep(0.1)
+    st = client.get('/api/status').get_json()
+    assert st['running'] is True
+    assert st['active'] is False
+    client.post('/api/stop')
+
+
+def test_sample_freq_returns_float():
+    """_sample_freq returns a float >= 0 even without hardware."""
+    import scanner_frontend as sf_mod
+    rms = sf_mod._sample_freq(146520000, 0.1)
+    assert isinstance(rms, float)
+    assert rms >= 0.0

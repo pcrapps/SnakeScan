@@ -6,8 +6,10 @@ from typing import List
 import subprocess
 import sys
 import os
+import shutil
 
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
+import numpy as np
 import csv
 import datetime as _dt
 import pathlib
@@ -78,6 +80,42 @@ def freq_to_str_hz(freq_hz: int) -> str:
     return f"{freq_hz/1e6:.3f} MHz"
 
 
+def _check_rtl_available() -> bool:
+    """Check if rtl_fm binary is on PATH."""
+    return shutil.which("rtl_fm") is not None
+
+
+def _sample_freq(freq_hz: int, dwell: float, gain: int = 25,
+                 squelch_db: int = 5, ppm: int = 0, sr: int = 22050) -> float:
+    """Capture audio from rtl_fm at freq_hz for dwell seconds, return RMS.
+
+    Returns 0.0 on any error (missing binary, timeout, device busy, etc).
+    """
+    try:
+        cmd = [
+            "timeout", f"{dwell}s",
+            "rtl_fm",
+            "-f", str(freq_hz),
+            "-M", "fm",
+            "-s", str(sr),
+            "-r", str(sr),
+            "-g", str(gain),
+            "-l", str(squelch_db),
+            "-p", str(ppm),
+            "-",
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL,
+                                timeout=dwell + 5)
+        raw = result.stdout
+        if len(raw) < 2:
+            return 0.0
+        data = np.frombuffer(raw, dtype=np.int16)
+        return float(np.sqrt(np.mean((data / 32768.0) ** 2)))
+    except Exception:
+        return 0.0
+
+
 @dataclass
 class ScannerState:
     freqs: List[int] = field(default_factory=build_freqs_2m_25khz)
@@ -96,15 +134,42 @@ class ScannerState:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _stop_event: threading.Event = field(default_factory=threading.Event)
     _kick_event: threading.Event = field(default_factory=threading.Event)
+    _resume_event: threading.Event = field(default_factory=threading.Event)
     # Latest client-provided location (optional)
     last_location: dict | None = None
+    # RTL-SDR config
+    sdr_gain: int = 25
+    sdr_squelch_db: int = 5
+    sdr_ppm: int = 0
+    sdr_sample_rate: int = 22050
+    # Wardrive stats
+    hit_count: int = 0
+    unique_freqs: set[int] = field(default_factory=set)
+    activity_log_path: pathlib.Path = field(
+        default_factory=lambda: pathlib.Path(
+            f"activity_{_dt.datetime.now():%Y%m%d_%H%M%S}.csv"
+        )
+    )
+    _rtl_available: bool | None = None  # None = not yet probed
+    # Cached activity log file handle (opened lazily, closed on stop)
+    _activity_file: object | None = field(default=None, init=False, repr=False)
+    _activity_writer: object | None = field(default=None, init=False, repr=False)
+    _activity_log_opened_for: pathlib.Path | None = field(default=None, init=False, repr=False)
 
     def start(self):
+        self._close_activity_log()
         with self._lock:
             if self.running:
                 return
             self.running = True
             self._stop_event.clear()
+            self._resume_event.set()
+            # Fresh activity log for each session
+            self.hit_count = 0
+            self.unique_freqs = set()
+            self.activity_log_path = pathlib.Path(
+                f"activity_{_dt.datetime.now():%Y%m%d_%H%M%S}.csv"
+            )
             if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(target=self._run_loop, daemon=True)
                 self._thread.start()
@@ -114,6 +179,19 @@ class ScannerState:
             self.running = False
             self._stop_event.set()
             self._kick_event.set()
+            self._resume_event.clear()
+        self._close_activity_log()
+
+    def _close_activity_log(self):
+        """Close the session activity log file handle."""
+        if self._activity_file is not None:
+            try:
+                self._activity_file.close()
+            except Exception:
+                pass
+            self._activity_file = None
+            self._activity_writer = None
+            self._activity_log_opened_for = None
 
     def toggle(self):
         if self.running:
@@ -124,8 +202,8 @@ class ScannerState:
     def _run_loop(self):
         while True:
             if not self.running:
-                # Sleep briefly when stopped, but keep thread alive for quick resume
-                time.sleep(0.05)
+                # Block until start() signals resume (zero CPU while idle)
+                self._resume_event.wait()
                 continue
 
             now = time.time()
@@ -140,21 +218,52 @@ class ScannerState:
             # Set current frequency for this dwell period
             self.current_freq_hz = self.freqs[self.current_index]
 
-            # Activity detection: deterministic hook for tests
-            self.active = self.current_index in self.force_active_indices
+            # Activity detection (3 tiers):
+            # 1. force_active_indices — deterministic test hook
+            # 2. RTL-SDR hardware via rtl_fm — real RMS sampling
+            # 3. Fallback: no activity
+            _used_hardware = False
+            if self.force_active_indices:
+                self.active = self.current_index in self.force_active_indices
+                self.rms = 1.0 if self.active else 0.0
+            else:
+                if self._rtl_available is None:
+                    self._rtl_available = _check_rtl_available()
+                if self._rtl_available:
+                    self.rms = _sample_freq(
+                        self.current_freq_hz, self.dwell_seconds,
+                        self.sdr_gain, self.sdr_squelch_db,
+                        self.sdr_ppm, self.sdr_sample_rate,
+                    )
+                    self.active = self.rms > self.rms_threshold
+                    _used_hardware = True
+                else:
+                    self.rms = 0.0
+                    self.active = False
+
+            # Auto-log hit
+            if self.active:
+                self.hit_count += 1
+                self.unique_freqs.add(self.current_freq_hz)
+                _log_activity_hit(self)
 
             # If active, set hold window
             if self.active and self.hold_seconds > 0:
                 self._hold_until_ts = time.time() + self.hold_seconds
                 continue
 
-            # Wait for dwell, but interrupt immediately if stop/hold is requested
-            self._kick_event.clear()
-            woke_stop = self._stop_event.wait(self.dwell_seconds)
-            woke_kick = self._kick_event.is_set()
-            if woke_stop or woke_kick:
-                # Interrupted: do not advance index
-                continue
+            # Dwell: if hardware sampled, dwell was consumed by _sample_freq;
+            # otherwise sleep-wait with interrupt support
+            if not _used_hardware:
+                self._kick_event.clear()
+                woke_stop = self._stop_event.wait(self.dwell_seconds)
+                woke_kick = self._kick_event.is_set()
+                if woke_stop or woke_kick:
+                    continue
+            else:
+                if self._stop_event.is_set() or self._kick_event.is_set():
+                    self._kick_event.clear()
+                    continue
 
             # Advance to next only if not stopped during dwell and not holding
             self.current_index = (self.current_index + 1) % len(self.freqs)
@@ -166,29 +275,81 @@ state = ScannerState()
 _io_lock = threading.Lock()
 _BOOKMARKS = pathlib.Path("bookmarks.csv")
 
+_ACTIVITY_LOG_HEADER = [
+    "timestamp", "freq_hz", "freq_str", "rms", "index",
+    "lat", "lon", "grid_square", "accuracy", "speed", "heading",
+]
+
+
+def _log_activity_hit(st: ScannerState) -> None:
+    """Append one row to the activity log CSV. Thread-safe via _io_lock."""
+    row = {
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "freq_hz": st.current_freq_hz,
+        "freq_str": freq_to_str_hz(st.current_freq_hz),
+        "rms": round(st.rms, 6),
+        "index": st.current_index,
+    }
+    if st.last_location:
+        row.update({
+            "lat": st.last_location.get("lat"),
+            "lon": st.last_location.get("lon"),
+            "grid_square": st.last_location.get("grid_square"),
+            "accuracy": st.last_location.get("accuracy"),
+            "speed": st.last_location.get("speed"),
+            "heading": st.last_location.get("heading"),
+        })
+    with _io_lock:
+        # Lazily open (or reopen if path changed, e.g. test override)
+        if st._activity_writer is None or st._activity_log_opened_for != st.activity_log_path:
+            if st._activity_file is not None:
+                try:
+                    st._activity_file.close()
+                except Exception:
+                    pass
+            new_file = not st.activity_log_path.exists()
+            st._activity_file = st.activity_log_path.open("a", newline="")
+            st._activity_writer = csv.DictWriter(
+                st._activity_file, fieldnames=_ACTIVITY_LOG_HEADER,
+                extrasaction="ignore")
+            if new_file:
+                st._activity_writer.writeheader()
+            st._activity_log_opened_for = st.activity_log_path
+        st._activity_writer.writerow(row)
+        st._activity_file.flush()
+
 
 @app.get("/")
 def index():
     return send_from_directory("web", "index.html")
 
 
-@app.get("/api/status")
-def api_status():
+def _build_status_payload() -> dict:
+    """Build the status dict used by both /api/status and SSE."""
     hold_remaining = max(0.0, state._hold_until_ts - time.time()) if state._hold_until_ts else 0.0
-    payload = dict(
-        running=state.running,
-        current_freq_hz=state.current_freq_hz,
-        current_freq_str=freq_to_str_hz(state.current_freq_hz),
-        dwell_seconds=state.dwell_seconds,
-        total_freqs=len(state.freqs),
-        index=state.current_index,
-        active=state.active,
-        hold_seconds=state.hold_seconds,
-        hold_remaining=round(hold_remaining, 3),
-    )
+    payload = {
+        "running": state.running,
+        "current_freq_hz": state.current_freq_hz,
+        "current_freq_str": freq_to_str_hz(state.current_freq_hz),
+        "dwell_seconds": state.dwell_seconds,
+        "total_freqs": len(state.freqs),
+        "index": state.current_index,
+        "active": state.active,
+        "rms": round(state.rms, 6),
+        "hold_seconds": state.hold_seconds,
+        "hold_remaining": round(hold_remaining, 3),
+        "hit_count": state.hit_count,
+        "unique_freq_count": len(state.unique_freqs),
+        "sdr_available": bool(state._rtl_available) if state._rtl_available is not None else None,
+    }
     if state.last_location:
         payload["location"] = state.last_location
-    return jsonify(payload)
+    return payload
+
+
+@app.get("/api/status")
+def api_status():
+    return jsonify(_build_status_payload())
 
 
 @app.post("/api/start")
@@ -237,25 +398,11 @@ def _sse_format(event: str, data: dict) -> str:
 
 @app.get("/api/events")
 def api_events():
-    def _status_snapshot() -> dict:
-        hold_remaining = max(0.0, state._hold_until_ts - time.time()) if state._hold_until_ts else 0.0
-        return {
-            "running": state.running,
-            "current_freq_hz": state.current_freq_hz,
-            "current_freq_str": freq_to_str_hz(state.current_freq_hz),
-            "dwell_seconds": state.dwell_seconds,
-            "total_freqs": len(state.freqs),
-            "index": state.current_index,
-            "active": state.active,
-            "hold_seconds": state.hold_seconds,
-            "hold_remaining": round(hold_remaining, 3),
-        }
-
     def stream():
         # Emit periodic status updates; include heartbeat comments to avoid buffering
         heartbeat = 0
         while True:
-            st = _status_snapshot()
+            st = _build_status_payload()
             yield _sse_format("status", st)
             if st.get("active"):
                 yield _sse_format("activity", {"freq": st["current_freq_str"], "index": st["index"]})

@@ -83,19 +83,34 @@
       let lastSpokenFreq = null;
       const pill = $('status-pill');
 
-      async function getStatus() {
-        const res = await fetch('/api/status', { cache: 'no-store' });
-        if (!res.ok) return;
-        const j = await res.json();
+      function updateUI(j) {
         freq.textContent = j.current_freq_str || '—';
         idx.textContent = j.index ?? 0;
         total.textContent = j.total_freqs ?? 0;
         dwell.textContent = (j.dwell_seconds ?? 0).toFixed(2);
         running.textContent = j.running ? 'true' : 'false';
+        holdrem.textContent = (j.hold_remaining ?? 0).toFixed(2);
+        if (j.location) {
+          const lat = (+j.location.lat).toFixed(5);
+          const lon = (+j.location.lon).toFixed(5);
+          loc.textContent = `${lat}, ${lon}`;
+          grid.textContent = j.location.grid_square || '—';
+          accuracy.textContent = j.location.accuracy ? `${(+j.location.accuracy).toFixed(0)}m` : '—';
+        } else {
+          loc.textContent = '—';
+          grid.textContent = '—';
+          accuracy.textContent = '—';
+        }
         meta.textContent = `Dwell ${(+j.dwell_seconds).toFixed(2)}s • ${j.index+1}/${j.total_freqs}`;
         toggle.textContent = j.running ? 'Pause' : 'Start';
-        pill.textContent = j.running ? 'Running' : 'Stopped';
+        pill.textContent = j.running ? (j.active ? 'Active' : 'Running') : 'Stopped';
         pill.className = 'pill ' + (j.running ? 'on' : 'off');
+      }
+
+      async function getStatus() {
+        const res = await fetch('/api/status', { cache: 'no-store' });
+        if (!res.ok) return;
+        updateUI(await res.json());
       }
 
       async function post(url, body) {
@@ -144,28 +159,7 @@
         try {
           const es = new EventSource('/api/events');
           es.addEventListener('status', (ev) => {
-            const j = JSON.parse(ev.data);
-            freq.textContent = j.current_freq_str || '—';
-            idx.textContent = j.index ?? 0;
-            total.textContent = j.total_freqs ?? 0;
-            dwell.textContent = (j.dwell_seconds ?? 0).toFixed(2);
-            running.textContent = j.running ? 'true' : 'false';
-            holdrem.textContent = (j.hold_remaining ?? 0).toFixed(2);
-            if (j.location) {
-              const lat = (+j.location.lat).toFixed(5);
-              const lon = (+j.location.lon).toFixed(5);
-              loc.textContent = `${lat}, ${lon}`;
-              grid.textContent = j.location.grid_square || '—';
-              accuracy.textContent = j.location.accuracy ? `${(+j.location.accuracy).toFixed(0)}m` : '—';
-            } else {
-              loc.textContent = '—';
-              grid.textContent = '—';
-              accuracy.textContent = '—';
-            }
-            meta.textContent = `Dwell ${(+j.dwell_seconds).toFixed(2)}s • ${j.index+1}/${j.total_freqs}`;
-            toggle.textContent = j.running ? 'Pause' : 'Start';
-            pill.textContent = j.running ? (j.active ? 'Active' : 'Running') : 'Stopped';
-            pill.className = 'pill ' + (j.running ? 'on' : 'off');
+            updateUI(JSON.parse(ev.data));
           });
           es.addEventListener('activity', (ev) => {
             if (!voiceOn || !window.speechSynthesis) return;
