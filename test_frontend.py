@@ -306,7 +306,6 @@ def test_sample_freq_returns_tuple():
     assert isinstance(raw, bytes)
 
 
-
 def test_fft_endpoint_structure():
     """FFT endpoint returns bins, power_db, timestamp when scanner is running."""
     import scanner_frontend as sf_mod
@@ -388,3 +387,55 @@ def test_set_freq_snaps_to_nearest():
     assert data['ok'] is True
     # Should snap to nearest (within 25 kHz step)
     assert abs(data['freq_hz'] - between_freq) <= 25000
+
+
+def test_health_endpoint_fields():
+    """/api/health returns expected fields and 503 when no SDR."""
+    client = sf.app.test_client()
+    resp = client.get('/api/health')
+    # No rtl_fm in test env -> 503 degraded
+    assert resp.status_code == 503
+    data = resp.get_json()
+    assert data['status'] == 'degraded'
+    assert data['sdr_available'] is False
+    assert isinstance(data['scanner_running'], bool)
+    assert 'disk' in data
+    assert data['disk'] is not None
+    assert 'total_gb' in data['disk']
+    assert 'free_gb' in data['disk']
+    assert 'used_pct' in data['disk']
+    assert isinstance(data['uptime_seconds'], (int, float))
+    assert data['uptime_seconds'] >= 0
+
+
+def test_health_with_sdr(monkeypatch):
+    """/api/health returns 200 when RTL-SDR is available."""
+    import scanner_frontend as sf_mod
+    monkeypatch.setattr(sf_mod, '_check_rtl_available', lambda: True)
+    client = sf_mod.app.test_client()
+    resp = client.get('/api/health')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['status'] == 'ok'
+    assert data['sdr_available'] is True
+
+
+def test_drive_route():
+    """/drive serves the driving mode HTML page."""
+    client = sf.app.test_client()
+    resp = client.get('/drive')
+    assert resp.status_code == 200
+    body = resp.data.decode('utf-8').lower()
+    assert 'snakescan drive' in body
+    assert 'holdBtn' in resp.data.decode('utf-8')
+    assert 'toggleBtn' in resp.data.decode('utf-8')
+
+
+def test_drive_mode_redirect(monkeypatch):
+    """When DRIVING_MODE=true, / redirects to /drive."""
+    import scanner_frontend as sf_mod
+    monkeypatch.setattr(sf_mod, 'DRIVING_MODE', True)
+    client = sf_mod.app.test_client()
+    resp = client.get('/')
+    assert resp.status_code in (301, 302, 308)
+    assert '/drive' in resp.headers.get('Location', '')

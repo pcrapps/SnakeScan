@@ -9,7 +9,7 @@ import os
 import shutil
 
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
+from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context, redirect
 import numpy as np
 import csv
 import datetime as _dt
@@ -22,6 +22,11 @@ AI_CLASSIFY_ENABLED = os.environ.get("AI_CLASSIFY_ENABLED", "false").lower() == 
 AI_VISION_API_URL = os.environ.get("AI_VISION_API_URL", "http://localhost:1234/v1/chat/completions")
 AI_VISION_MODEL = os.environ.get("AI_VISION_MODEL", "qwen3-vl-8b")
 AI_CAPTURE_SECONDS = float(os.environ.get("AI_CAPTURE_SECONDS", "0.5"))
+
+# ----- Config from environment -----
+DRIVING_MODE = os.environ.get("DRIVING_MODE", "false").lower() in ("true", "1", "yes")
+HOTSPOT_SSID = os.environ.get("HOTSPOT_SSID", "SnakeScan")
+_BOOT_TIME = time.monotonic()
 
 
 # ----- FFT Configuration -----
@@ -411,11 +416,6 @@ def _log_activity_hit(st: ScannerState) -> None:
         st._activity_file.flush()
 
 
-@app.get("/")
-def index():
-    return send_from_directory("web", "index.html")
-
-
 def _build_status_payload() -> dict:
     """Build the status dict used by both /api/status and SSE."""
     hold_remaining = max(0.0, state._hold_until_ts - time.time()) if state._hold_until_ts else 0.0
@@ -602,7 +602,6 @@ def api_last_classification():
     return jsonify(ok=True, **state.last_classification)
 
 
-
 @app.get("/api/fft")
 def api_fft():
     if not FFT_ENABLED:
@@ -627,6 +626,108 @@ def api_set_freq():
     return jsonify(ok=True, freq_hz=state.current_freq_hz,
                    freq_str=freq_to_str_hz(state.current_freq_hz),
                    index=nearest_idx)
+
+
+@app.get("/api/health")
+def api_health():
+    # RTL-SDR status
+    sdr_available = _check_rtl_available()
+    scanner_running = state.running
+
+    # Disk space
+    try:
+        usage = shutil.disk_usage("/")
+        disk = {
+            "total_gb": round(usage.total / (1 << 30), 1),
+            "free_gb": round(usage.free / (1 << 30), 1),
+            "used_pct": round((usage.used / usage.total) * 100, 1),
+        }
+    except OSError:
+        disk = None
+
+    uptime_sec = round(time.monotonic() - _BOOT_TIME, 1)
+
+    payload = {
+        "status": "ok" if sdr_available else "degraded",
+        "sdr_available": sdr_available,
+        "scanner_running": scanner_running,
+        "disk": disk,
+        "uptime_seconds": uptime_sec,
+    }
+    code = 200 if sdr_available else 503
+    return jsonify(payload), code
+
+
+# ----- Driving Mode UI -----
+_DRIVE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"/>
+<title>SnakeScan Drive</title>
+<style>
+:root{--bg:#000;--ink:#e8f0ff;--muted:#667;--accent:#4cc9f0;--ok:#7ee787;--warn:#f2cc60}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:system-ui,sans-serif;
+     display:flex;flex-direction:column;align-items:center;justify-content:center;
+     min-height:100vh;min-height:100dvh;overflow:hidden;-webkit-user-select:none;user-select:none}
+#freq{font-size:min(18vw,120px);font-weight:800;font-variant-numeric:tabular-nums;
+      letter-spacing:1px;text-align:center;padding:12px 0}
+#status{font-size:min(5vw,28px);color:var(--muted);margin-bottom:24px;text-align:center}
+.btn-row{display:flex;gap:16px;width:90vw;max-width:500px}
+.btn{flex:1;padding:24px 0;border:0;border-radius:16px;font-size:min(6vw,32px);
+     font-weight:700;cursor:pointer;touch-action:manipulation}
+.btn-hold{background:var(--accent);color:#000}
+.btn-hold.active{background:var(--ok)}
+.btn-toggle{background:#222;color:var(--ink)}
+.btn-toggle.running{background:#311;color:var(--warn)}
+.pill{display:inline-block;padding:4px 12px;border-radius:999px;font-size:min(4vw,18px);font-weight:600}
+.pill.on{background:rgba(126,231,135,0.2);color:var(--ok)}
+.pill.off{background:rgba(242,204,96,0.15);color:var(--warn)}
+.pill.active{background:rgba(76,201,240,0.2);color:var(--accent)}
+</style>
+</head>
+<body>
+<div id="freq">144.000 MHz</div>
+<div id="status"><span id="pill" class="pill off">Stopped</span></div>
+<div class="btn-row">
+  <button class="btn btn-toggle" id="toggleBtn">Start</button>
+  <button class="btn btn-hold" id="holdBtn">Hold</button>
+</div>
+<script>
+const freq=document.getElementById('freq'),pill=document.getElementById('pill'),
+      toggleBtn=document.getElementById('toggleBtn'),holdBtn=document.getElementById('holdBtn');
+function update(j){
+  freq.textContent=j.current_freq_str||'---';
+  pill.textContent=j.running?(j.active?'Active':'Scanning'):'Stopped';
+  pill.className='pill '+(j.running?(j.active?'active':'on'):'off');
+  toggleBtn.textContent=j.running?'Stop':'Start';
+  toggleBtn.className='btn btn-toggle'+(j.running?' running':'');
+  holdBtn.className='btn btn-hold'+(j.hold_remaining>0?' active':'');
+}
+async function post(u,b){return(await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):null})).json()}
+toggleBtn.onclick=()=>post('/api/toggle').then(()=>fetch('/api/status').then(r=>r.json()).then(update));
+holdBtn.onclick=()=>post('/api/hold',{seconds:5}).then(()=>fetch('/api/status').then(r=>r.json()).then(update));
+if('EventSource' in window){
+  const es=new EventSource('/api/events');
+  es.addEventListener('status',e=>update(JSON.parse(e.data)));
+}else{setInterval(()=>fetch('/api/status').then(r=>r.json()).then(update),250)}
+</script>
+</body>
+</html>"""
+
+
+@app.get("/drive")
+def drive_mode():
+    return Response(_DRIVE_HTML, mimetype="text/html")
+
+
+@app.get("/")
+def index_or_drive():
+    """Serve main UI, or redirect to /drive if DRIVING_MODE is enabled."""
+    if DRIVING_MODE:
+        return redirect("/drive")
+    return send_from_directory("web", "index.html")
 
 
 def cleanup_existing_processes():
