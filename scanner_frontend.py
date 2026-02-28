@@ -24,6 +24,12 @@ AI_VISION_MODEL = os.environ.get("AI_VISION_MODEL", "qwen3-vl-8b")
 AI_CAPTURE_SECONDS = float(os.environ.get("AI_CAPTURE_SECONDS", "0.5"))
 
 
+# ----- FFT Configuration -----
+FFT_ENABLED = os.environ.get("FFT_ENABLED", "1").lower() not in ("0", "false", "no")
+FFT_INTERVAL_SECONDS = float(os.environ.get("FFT_INTERVAL_SECONDS", "1.0"))
+FFT_BINS = int(os.environ.get("FFT_BINS", "256"))
+
+
 # ----- GPS Utilities -----
 def lat_lon_to_maidenhead(lat: float, lon: float) -> str:
     """Convert latitude/longitude to Maidenhead grid square (6-character)"""
@@ -168,6 +174,10 @@ class ScannerState:
     _activity_file: object | None = field(default=None, init=False, repr=False)
     _activity_writer: object | None = field(default=None, init=False, repr=False)
     _activity_log_opened_for: pathlib.Path | None = field(default=None, init=False, repr=False)
+    # FFT state
+    last_fft: dict | None = None
+    _fft_thread: threading.Thread | None = None
+    _fft_stop: threading.Event = field(default_factory=threading.Event)
 
     def start(self):
         self._close_activity_log()
@@ -186,6 +196,11 @@ class ScannerState:
             if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(target=self._run_loop, daemon=True)
                 self._thread.start()
+            if FFT_ENABLED:
+                self._fft_stop.clear()
+                if self._fft_thread is None or not self._fft_thread.is_alive():
+                    self._fft_thread = threading.Thread(target=self._fft_loop, daemon=True)
+                    self._fft_thread.start()
 
     def stop(self):
         with self._lock:
@@ -193,6 +208,8 @@ class ScannerState:
             self._stop_event.set()
             self._kick_event.set()
             self._resume_event.clear()
+        self._fft_stop.set()
+        self.last_fft = None
         self._close_activity_log()
 
     def _close_activity_log(self):
@@ -284,6 +301,52 @@ class ScannerState:
 
             # Advance to next only if not stopped during dwell and not holding
             self.current_index = (self.current_index + 1) % len(self.freqs)
+
+    def _fft_loop(self):
+        """Background thread: compute FFT at configured interval."""
+        while not self._fft_stop.is_set():
+            if self.running:
+                try:
+                    self._compute_fft()
+                except Exception:
+                    pass
+            self._fft_stop.wait(FFT_INTERVAL_SECONDS)
+
+    def _compute_fft(self):
+        """Compute FFT spectrum from simulated (or real) samples using numpy.fft.rfft."""
+        n_samples = FFT_BINS * 2
+        freq_start = self.freqs[0]
+        freq_end = self.freqs[-1]
+        bw = freq_end - freq_start
+
+        # Synthetic baseband signal (noise floor)
+        samples = np.random.normal(0, 0.01, n_samples)
+
+        # Inject tones at active frequencies
+        active_hz = set()
+        if self.active and self.current_freq_hz:
+            active_hz.add(self.current_freq_hz)
+        for fi in self.force_active_indices:
+            if 0 <= fi < len(self.freqs):
+                active_hz.add(self.freqs[fi])
+
+        if active_hz:
+            t = np.arange(n_samples)
+            for af in active_hz:
+                norm = (af - freq_start) / bw * 0.5
+                samples += 0.1 * np.sin(2 * np.pi * norm * t)
+
+        # Compute real FFT
+        spectrum = np.fft.rfft(samples)
+        power = np.abs(spectrum[:FFT_BINS]) ** 2
+        power_db = 10.0 * np.log10(power + 1e-12)
+
+        bins = np.linspace(freq_start, freq_end, FFT_BINS)
+        self.last_fft = {
+            "bins": bins.tolist(),
+            "power_db": power_db.tolist(),
+            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        }
 
 
 def _submit_classification(st: ScannerState, freq_hz: int, audio_bytes: bytes) -> None:
@@ -537,6 +600,33 @@ def api_last_classification():
     if state.last_classification is None:
         return jsonify(ok=True, classification=None)
     return jsonify(ok=True, **state.last_classification)
+
+
+
+@app.get("/api/fft")
+def api_fft():
+    if not FFT_ENABLED:
+        return jsonify(ok=False, error="FFT disabled"), 404
+    if state.last_fft is None:
+        return jsonify(bins=[], power_db=[], timestamp=None)
+    return jsonify(state.last_fft)
+
+
+@app.post("/api/set_freq")
+def api_set_freq():
+    if not request.is_json:
+        return jsonify(ok=False, error="Expected JSON"), 400
+    freq_hz = request.json.get("freq_hz")
+    if not isinstance(freq_hz, (int, float)):
+        return jsonify(ok=False, error="freq_hz required"), 400
+    freq_hz = int(freq_hz)
+    nearest_idx = int(np.argmin(np.abs(np.array(state.freqs) - freq_hz)))
+    state.current_index = nearest_idx
+    state.current_freq_hz = state.freqs[nearest_idx]
+    state._kick_event.set()
+    return jsonify(ok=True, freq_hz=state.current_freq_hz,
+                   freq_str=freq_to_str_hz(state.current_freq_hz),
+                   index=nearest_idx)
 
 
 def cleanup_existing_processes():
