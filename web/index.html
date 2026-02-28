@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SnakeScan – 2m Band Scanner</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
       :root { --bg: #0b0f14; --card: #121821; --ink: #e8f0ff; --muted: #9bb0ca; --accent: #4cc9f0; --ok: #7ee787; --warn: #f2cc60; }
       * { box-sizing: border-box; }
@@ -23,38 +24,74 @@
       .stat .k { color: var(--muted); font-size: 12px; }
       .stat .v { font-variant-numeric: tabular-nums; font-weight: 700; }
       footer { margin-top: 16px; color: var(--muted); font-size: 12px; text-align: right; }
+      /* Tabs */
+      .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+      .tabs button { border-radius: 8px 8px 0 0; padding: 8px 20px; font-size: 14px; background: #0e141c; color: var(--muted); }
+      .tabs button.active { background: var(--accent); color: #061017; }
+      .panel { display: none; }
+      .panel.active { display: block; }
+      /* APRS */
+      .aprs-list { max-height: 200px; overflow-y: auto; margin-bottom: 12px; }
+      .aprs-list table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      .aprs-list th { text-align: left; color: var(--muted); font-size: 11px; padding: 4px 6px; border-bottom: 1px solid #243041; position: sticky; top: 0; background: var(--card); }
+      .aprs-list td { padding: 4px 6px; border-bottom: 1px solid #1a2233; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+      .aprs-list tr:hover td { background: #1a2233; }
+      .aprs-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 24px 0; }
+      #aprs-map { height: 280px; border-radius: 10px; margin-top: 8px; background: #0e141c; }
     </style>
   </head>
   <body>
     <main class="card">
       <h1>📡 SnakeScan – 2m Band</h1>
-      <div class="row" style="margin-bottom: 12px;">
-        <div>
-          <div id="freq" class="freq">144.000 MHz</div>
-          <div class="meta">
-            <span id="status-pill" class="pill off">Stopped</span>
-            <span>•</span>
-            <span id="meta">Dwell 0.50s • 0/0</span>
+
+      <div class="tabs">
+        <button class="active" data-tab="scanner-panel">Scanner</button>
+        <button data-tab="aprs-panel">APRS</button>
+      </div>
+
+      <div id="scanner-panel" class="panel active">
+        <div class="row" style="margin-bottom: 12px;">
+          <div>
+            <div id="freq" class="freq">144.000 MHz</div>
+            <div class="meta">
+              <span id="status-pill" class="pill off">Stopped</span>
+              <span>&bull;</span>
+              <span id="meta">Dwell 0.50s &bull; 0/0</span>
+            </div>
+          </div>
+          <div class="row" style="gap: 8px;">
+            <button id="toggle">Start</button>
+            <button id="stop" class="secondary">Stop</button>
+            <button id="hold" class="secondary">Hold 3s</button>
+            <button id="bookmark" class="secondary">Bookmark</button>
+            <button id="geo" class="secondary">Geo OFF</button>
           </div>
         </div>
-        <div class="row" style="gap: 8px;">
-          <button id="toggle">Start</button>
-          <button id="stop" class="secondary">Stop</button>
-          <button id="hold" class="secondary">Hold 3s</button>
-          <button id="bookmark" class="secondary">Bookmark</button>
-          <button id="geo" class="secondary">Geo OFF</button>
+
+        <div class="grid">
+          <div class="stat"><div class="k">Current index</div><div class="v" id="idx">0</div></div>
+          <div class="stat"><div class="k">Total freqs</div><div class="v" id="total">0</div></div>
+          <div class="stat"><div class="k">Dwell (s)</div><div class="v" id="dwell">0.50</div></div>
+          <div class="stat"><div class="k">Running</div><div class="v" id="running">false</div></div>
+          <div class="stat"><div class="k">Hold</div><div class="v" id="holdrem">0.00</div></div>
+          <div class="stat"><div class="k">Location</div><div class="v" id="loc">&mdash;</div></div>
+          <div class="stat"><div class="k">Grid Square</div><div class="v" id="grid">&mdash;</div></div>
+          <div class="stat"><div class="k">GPS Accuracy</div><div class="v" id="accuracy">&mdash;</div></div>
         </div>
       </div>
 
-      <div class="grid">
-        <div class="stat"><div class="k">Current index</div><div class="v" id="idx">0</div></div>
-        <div class="stat"><div class="k">Total freqs</div><div class="v" id="total">0</div></div>
-        <div class="stat"><div class="k">Dwell (s)</div><div class="v" id="dwell">0.50</div></div>
-        <div class="stat"><div class="k">Running</div><div class="v" id="running">false</div></div>
-        <div class="stat"><div class="k">Hold</div><div class="v" id="holdrem">0.00</div></div>
-        <div class="stat"><div class="k">Location</div><div class="v" id="loc">—</div></div>
-        <div class="stat"><div class="k">Grid Square</div><div class="v" id="grid">—</div></div>
-        <div class="stat"><div class="k">GPS Accuracy</div><div class="v" id="accuracy">—</div></div>
+      <div id="aprs-panel" class="panel">
+        <div style="margin-bottom: 8px; color: var(--muted); font-size: 13px;">
+          144.390 MHz &bull; <span id="aprs-count">0</span> packets
+        </div>
+        <div class="aprs-list">
+          <table>
+            <thead><tr><th>Time</th><th>Call</th><th>Pos</th><th>Comment</th></tr></thead>
+            <tbody id="aprs-tbody"></tbody>
+          </table>
+          <div id="aprs-empty" class="aprs-empty">No APRS packets received yet</div>
+        </div>
+        <div id="aprs-map"></div>
       </div>
 
       <div style="margin-top: 16px;">
@@ -64,10 +101,11 @@
       </div>
 
       <footer>
-        Basic demo UI – updates ~4×/sec
+        Basic demo UI – updates ~4&times;/sec
       </footer>
     </main>
 
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
       const $ = (id) => document.getElementById(id);
       const freq = $('freq');
@@ -89,8 +127,21 @@
       let lastSpokenFreq = null;
       const pill = $('status-pill');
 
+      /* --- Tab switching --- */
+      document.querySelectorAll('.tabs button').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+          document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+          btn.classList.add('active');
+          $(btn.dataset.tab).classList.add('active');
+          if (btn.dataset.tab === 'aprs-panel' && aprsMap) {
+            aprsMap.invalidateSize();
+          }
+        });
+      });
+
       function updateUI(j) {
-        freq.textContent = j.current_freq_str || '—';
+        freq.textContent = j.current_freq_str || '\u2014';
         idx.textContent = j.index ?? 0;
         total.textContent = j.total_freqs ?? 0;
         dwell.textContent = (j.dwell_seconds ?? 0).toFixed(2);
@@ -100,14 +151,14 @@
           const lat = (+j.location.lat).toFixed(5);
           const lon = (+j.location.lon).toFixed(5);
           loc.textContent = `${lat}, ${lon}`;
-          grid.textContent = j.location.grid_square || '—';
-          accuracy.textContent = j.location.accuracy ? `${(+j.location.accuracy).toFixed(0)}m` : '—';
+          grid.textContent = j.location.grid_square || '\u2014';
+          accuracy.textContent = j.location.accuracy ? `${(+j.location.accuracy).toFixed(0)}m` : '\u2014';
         } else {
-          loc.textContent = '—';
-          grid.textContent = '—';
-          accuracy.textContent = '—';
+          loc.textContent = '\u2014';
+          grid.textContent = '\u2014';
+          accuracy.textContent = '\u2014';
         }
-        meta.textContent = `Dwell ${(+j.dwell_seconds).toFixed(2)}s • ${j.index+1}/${j.total_freqs}`;
+        meta.textContent = `Dwell ${(+j.dwell_seconds).toFixed(2)}s \u2022 ${j.index+1}/${j.total_freqs}`;
         toggle.textContent = j.running ? 'Pause' : 'Start';
         pill.textContent = j.running ? (j.active ? 'Active' : 'Running') : 'Stopped';
         pill.className = 'pill ' + (j.running ? 'on' : 'off');
@@ -159,6 +210,77 @@
         }
       });
 
+      /* --- APRS Panel --- */
+      let aprsMap = null;
+      const aprsMarkers = {};
+      const aprsTbody = $('aprs-tbody');
+      const aprsEmpty = $('aprs-empty');
+      const aprsCount = $('aprs-count');
+      let aprsPacketCount = 0;
+
+      function initAprsMap() {
+        aprsMap = L.map('aprs-map').setView([39.8283, -98.5795], 4);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OSM',
+          maxZoom: 18,
+        }).addTo(aprsMap);
+      }
+
+      function addAprsPacket(pkt) {
+        aprsPacketCount++;
+        aprsCount.textContent = aprsPacketCount;
+        aprsEmpty.style.display = 'none';
+
+        // Add row to table (newest first)
+        const tr = document.createElement('tr');
+        const ts = (pkt.timestamp || '').replace(/.*T/, '').replace('Z', '');
+        const posStr = (pkt.lat != null && pkt.lon != null)
+          ? `${(+pkt.lat).toFixed(4)}, ${(+pkt.lon).toFixed(4)}`
+          : '\u2014';
+        tr.innerHTML = `<td>${ts}</td><td>${pkt.from || '\u2014'}</td><td>${posStr}</td><td title="${pkt.comment || pkt.info || ''}">${pkt.comment || ''}</td>`;
+
+        // Click row to show detail
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', () => {
+          if (pkt.lat != null && pkt.lon != null && aprsMap) {
+            aprsMap.setView([pkt.lat, pkt.lon], 12);
+            const key = pkt.from + '|' + pkt.lat + '|' + pkt.lon;
+            if (aprsMarkers[key]) aprsMarkers[key].openPopup();
+          }
+        });
+
+        if (aprsTbody.firstChild) {
+          aprsTbody.insertBefore(tr, aprsTbody.firstChild);
+        } else {
+          aprsTbody.appendChild(tr);
+        }
+
+        // Trim table to 100 rows
+        while (aprsTbody.children.length > 100) {
+          aprsTbody.removeChild(aprsTbody.lastChild);
+        }
+
+        // Add map marker if position exists
+        if (pkt.lat != null && pkt.lon != null && aprsMap) {
+          const key = pkt.from + '|' + pkt.lat + '|' + pkt.lon;
+          if (!aprsMarkers[key]) {
+            const popup = `<b>${pkt.from || 'Unknown'}</b><br>${posStr}<br>${pkt.comment || ''}<br><small>${pkt.timestamp || ''}</small>`;
+            const marker = L.marker([pkt.lat, pkt.lon]).addTo(aprsMap).bindPopup(popup);
+            aprsMarkers[key] = marker;
+          }
+        }
+      }
+
+      // Load existing APRS packets on page load
+      async function loadAprs() {
+        try {
+          const res = await fetch('/api/aprs', { cache: 'no-store' });
+          if (!res.ok) return;
+          const data = await res.json();
+          (data.packets || []).forEach(addAprsPacket);
+        } catch (_) {}
+      }
+
       // Prefer SSE for low-latency updates; fall back to polling
       function setupEvents() {
         if (!('EventSource' in window)) return false;
@@ -173,6 +295,9 @@
             const text = String(d.freq || '').replace('MHz', ' mega hertz');
             speechSynthesis.cancel();
             speechSynthesis.speak(new SpeechSynthesisUtterance('Active ' + text + ', holding'));
+          });
+          es.addEventListener('aprs', (ev) => {
+            addAprsPacket(JSON.parse(ev.data));
           });
           return true;
         } catch (_) { return false; }
@@ -353,6 +478,10 @@
         requestAnimationFrame(fftPoll);
       }
       requestAnimationFrame(fftPoll);
+
+      // Init APRS map and load existing packets
+      initAprsMap();
+      loadAprs();
     </script>
   </body>
   </html>

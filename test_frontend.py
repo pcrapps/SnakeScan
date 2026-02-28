@@ -307,6 +307,7 @@ def test_sample_freq_returns_tuple():
 
 
 
+
 def test_fft_endpoint_structure():
     """FFT endpoint returns bins, power_db, timestamp when scanner is running."""
     import scanner_frontend as sf_mod
@@ -388,3 +389,126 @@ def test_set_freq_snaps_to_nearest():
     assert data['ok'] is True
     # Should snap to nearest (within 25 kHz step)
     assert abs(data['freq_hz'] - between_freq) <= 25000
+
+
+# ----- APRS Tests -----
+
+def test_aprs_config_defaults():
+    """APRS config constants have correct defaults."""
+    assert sf.APRS_FREQ_HZ == 144390000
+    assert sf.APRS_LOG_SIZE == 100
+    assert sf.APRS_ENABLED is False
+
+
+def test_aprs_endpoint_empty():
+    """GET /api/aprs returns empty list initially."""
+    import scanner_frontend as sf_mod
+    sf_mod.state.aprs_log = []
+    client = sf_mod.app.test_client()
+    data = client.get('/api/aprs').get_json()
+    assert 'packets' in data
+    assert data['packets'] == []
+
+
+def test_parse_aprs_packet():
+    """Parse a TNC2 APRS packet string with position."""
+    raw = "WB2OSZ-5>APDW18,WIDE1-1:!4237.14N/07120.83W-PHG2360"
+    pkt = sf._parse_aprs_packet(raw)
+    assert pkt is not None
+    assert pkt['from'] == 'WB2OSZ-5'
+    assert pkt['to'] == 'APDW18'
+    assert pkt['path'] == ['WIDE1-1']
+    assert abs(pkt['lat'] - 42.619) < 0.01
+    assert abs(pkt['lon'] - (-71.347)) < 0.01
+    assert pkt['comment'] == 'PHG2360'
+    assert 'timestamp' in pkt
+    assert pkt['raw'] == raw
+
+
+def test_parse_aprs_packet_no_position():
+    """Parse a TNC2 APRS packet without position data."""
+    raw = "W1ABC>APRS:>Status message here"
+    pkt = sf._parse_aprs_packet(raw)
+    assert pkt is not None
+    assert pkt['from'] == 'W1ABC'
+    assert pkt['to'] == 'APRS'
+    assert 'lat' not in pkt
+    assert 'lon' not in pkt
+
+
+def test_parse_aprs_packet_invalid():
+    """Invalid strings return None."""
+    assert sf._parse_aprs_packet("not a packet") is None
+    assert sf._parse_aprs_packet("") is None
+
+
+def test_parse_aprs_position():
+    """Parse lat/lon from APRS info field."""
+    pos = sf._parse_aprs_position("!4903.50N/07201.75W>")
+    assert pos is not None
+    assert abs(pos['lat'] - 49.05833) < 0.001
+    assert abs(pos['lon'] - (-72.02917)) < 0.001
+    assert pos['symbol_table'] == '/'
+    assert pos['symbol_code'] == '>'
+
+
+def test_parse_aprs_position_southern():
+    """Parse position in southern/eastern hemisphere."""
+    pos = sf._parse_aprs_position("!3349.50S/15101.75E>")
+    assert pos is not None
+    assert pos['lat'] < 0
+    assert pos['lon'] > 0
+
+
+def test_parse_aprs_position_none():
+    """No position in non-position packets."""
+    assert sf._parse_aprs_position(">Just a status") is None
+    assert sf._parse_aprs_position(":W1ABC:hello") is None
+
+
+def test_aprs_log_ring_buffer():
+    """APRS log ring buffer respects max size."""
+    import scanner_frontend as sf_mod
+    sf_mod.state.aprs_log = []
+    sf_mod.state._aprs_seq = 0
+    for i in range(150):
+        sf_mod._add_aprs_packet(sf_mod.state, {'from': f'TEST-{i}', 'raw': f'test{i}'})
+    assert len(sf_mod.state.aprs_log) == sf.APRS_LOG_SIZE
+    assert sf_mod.state._aprs_seq == 150
+    # Oldest should be TEST-50 (first 50 were popped)
+    assert sf_mod.state.aprs_log[0]['from'] == 'TEST-50'
+    # Cleanup
+    sf_mod.state.aprs_log = []
+    sf_mod.state._aprs_seq = 0
+
+
+def test_parse_direwolf_line():
+    """Parse direwolf output line."""
+    raw = sf._parse_direwolf_line("[0.0] WB2OSZ>APDW18:!4237.14N/07120.83W-")
+    assert raw == "WB2OSZ>APDW18:!4237.14N/07120.83W-"
+    assert sf._parse_direwolf_line("some other output") is None
+
+
+def test_parse_multimon_line():
+    """Parse multimon-ng output line."""
+    raw = sf._parse_multimon_line("APRS: WB2OSZ>APDW18:!4237.14N/07120.83W-")
+    assert raw == "WB2OSZ>APDW18:!4237.14N/07120.83W-"
+    assert sf._parse_multimon_line("some other output") is None
+
+
+def test_aprs_endpoint_with_packets():
+    """GET /api/aprs returns injected packets."""
+    import scanner_frontend as sf_mod
+    sf_mod.state.aprs_log = []
+    sf_mod._add_aprs_packet(sf_mod.state, {
+        'from': 'W1TEST', 'to': 'APRS', 'raw': 'W1TEST>APRS:test',
+        'lat': 42.0, 'lon': -71.0, 'timestamp': '2024-01-01T00:00:00Z',
+    })
+    client = sf_mod.app.test_client()
+    data = client.get('/api/aprs').get_json()
+    assert len(data['packets']) == 1
+    assert data['packets'][0]['from'] == 'W1TEST'
+    assert data['packets'][0]['lat'] == 42.0
+    # Cleanup
+    sf_mod.state.aprs_log = []
+    sf_mod.state._aprs_seq = 0

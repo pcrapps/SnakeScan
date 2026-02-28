@@ -7,6 +7,7 @@ import subprocess
 import sys
 import os
 import shutil
+import re
 
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
@@ -28,6 +29,11 @@ AI_CAPTURE_SECONDS = float(os.environ.get("AI_CAPTURE_SECONDS", "0.5"))
 FFT_ENABLED = os.environ.get("FFT_ENABLED", "1").lower() not in ("0", "false", "no")
 FFT_INTERVAL_SECONDS = float(os.environ.get("FFT_INTERVAL_SECONDS", "1.0"))
 FFT_BINS = int(os.environ.get("FFT_BINS", "256"))
+
+# ----- APRS Configuration -----
+APRS_ENABLED = os.environ.get("APRS_ENABLED", "false").lower() in ("true", "1", "yes")
+APRS_FREQ_HZ = int(os.environ.get("APRS_FREQ_HZ", "144390000"))
+APRS_LOG_SIZE = int(os.environ.get("APRS_LOG_SIZE", "100"))
 
 
 # ----- GPS Utilities -----
@@ -178,6 +184,11 @@ class ScannerState:
     last_fft: dict | None = None
     _fft_thread: threading.Thread | None = None
     _fft_stop: threading.Event = field(default_factory=threading.Event)
+    # APRS state
+    aprs_log: list = field(default_factory=list)
+    _aprs_seq: int = 0
+    _aprs_thread: threading.Thread | None = None
+    _aprs_stop_event: threading.Event = field(default_factory=threading.Event)
 
     def start(self):
         self._close_activity_log()
@@ -222,6 +233,27 @@ class ScannerState:
             self._activity_file = None
             self._activity_writer = None
             self._activity_log_opened_for = None
+
+    def start_aprs(self):
+        """Start APRS listener thread if APRS_ENABLED."""
+        if not APRS_ENABLED:
+            return
+        if self._aprs_thread and self._aprs_thread.is_alive():
+            return
+        self._aprs_stop_event.clear()
+        self._aprs_thread = threading.Thread(
+            target=_aprs_capture_loop,
+            args=(self, self._aprs_stop_event),
+            daemon=True,
+        )
+        self._aprs_thread.start()
+
+    def stop_aprs(self):
+        """Stop APRS listener thread."""
+        self._aprs_stop_event.set()
+        if self._aprs_thread:
+            self._aprs_thread.join(timeout=5)
+            self._aprs_thread = None
 
     def toggle(self):
         if self.running:
@@ -361,6 +393,158 @@ def _submit_classification(st: ScannerState, freq_hz: int, audio_bytes: bytes) -
     st._ai_executor.submit(_do_classify)
 
 
+# ----- APRS Decode -----
+_APRS_TNC2_RE = re.compile(r'^([^>]+)>([^:]+):(.*)', re.DOTALL)
+_APRS_POS_RE = re.compile(
+    r'([0-8]\d|90)([0-5]\d\.\d{2})([NS])'
+    r'(.)'
+    r'(0\d{2}|1[0-7]\d|180)([0-5]\d\.\d{2})([EW])'
+    r'(.)'
+)
+_DIREWOLF_LINE_RE = re.compile(r'\[\d+\.\d+\]\s+(.*)')
+_MULTIMON_LINE_RE = re.compile(r'APRS:\s+(.*)')
+
+
+def _parse_aprs_position(info: str) -> dict | None:
+    """Extract lat/lon from APRS information field (uncompressed format)."""
+    m = _APRS_POS_RE.search(info)
+    if not m:
+        return None
+    lat = int(m.group(1)) + float(m.group(2)) / 60.0
+    if m.group(3) == 'S':
+        lat = -lat
+    lon = int(m.group(5)) + float(m.group(6)) / 60.0
+    if m.group(7) == 'W':
+        lon = -lon
+    return {
+        'lat': round(lat, 6),
+        'lon': round(lon, 6),
+        'symbol_table': m.group(4),
+        'symbol_code': m.group(8),
+    }
+
+
+def _parse_aprs_packet(raw: str) -> dict | None:
+    """Parse a TNC2-format APRS packet string into a dict."""
+    m = _APRS_TNC2_RE.match(raw)
+    if not m:
+        return None
+    source = m.group(1).strip()
+    dest_path = m.group(2).strip()
+    info = m.group(3)
+
+    parts = dest_path.split(',')
+    dest = parts[0]
+    path = parts[1:] if len(parts) > 1 else []
+
+    packet = {
+        'raw': raw,
+        'from': source,
+        'to': dest,
+        'path': path,
+        'info': info,
+        'timestamp': _dt.datetime.now(_dt.timezone.utc).isoformat(timespec='seconds'),
+    }
+
+    pos = _parse_aprs_position(info)
+    if pos:
+        packet.update(pos)
+
+    # Extract comment (text after position data)
+    pm = _APRS_POS_RE.search(info)
+    if pm:
+        comment = info[pm.end():].strip()
+        if comment:
+            packet['comment'] = comment
+
+    return packet
+
+
+def _parse_direwolf_line(line: str) -> str | None:
+    """Extract TNC2 frame from direwolf output line."""
+    m = _DIREWOLF_LINE_RE.match(line)
+    return m.group(1) if m else None
+
+
+def _parse_multimon_line(line: str) -> str | None:
+    """Extract TNC2 frame from multimon-ng output line."""
+    m = _MULTIMON_LINE_RE.match(line)
+    return m.group(1) if m else None
+
+
+def _add_aprs_packet(st: ScannerState, packet: dict) -> None:
+    """Add parsed APRS packet to the ring buffer. Thread-safe."""
+    with st._lock:
+        st.aprs_log.append(packet)
+        if len(st.aprs_log) > APRS_LOG_SIZE:
+            st.aprs_log.pop(0)
+        st._aprs_seq += 1
+
+
+def _aprs_capture_loop(st: ScannerState, stop_event: threading.Event):
+    """Background APRS decoder: rtl_fm piped to direwolf or multimon-ng."""
+    has_rtl = shutil.which("rtl_fm")
+    has_direwolf = shutil.which("direwolf")
+    has_multimon = shutil.which("multimon-ng")
+
+    if not has_rtl:
+        print("APRS: rtl_fm not found, APRS decode disabled")
+        return
+
+    rtl_cmd = [
+        'rtl_fm', '-f', str(APRS_FREQ_HZ),
+        '-M', 'fm', '-s', '22050', '-r', '22050', '-g', '25', '-',
+    ]
+
+    if has_direwolf:
+        print(f"APRS: using direwolf on {APRS_FREQ_HZ / 1e6:.3f} MHz")
+        decode_cmd = ['direwolf', '-r', '22050', '-n', '1', '-b', '16', '-']
+        line_parser = _parse_direwolf_line
+    elif has_multimon:
+        print(f"APRS: using multimon-ng on {APRS_FREQ_HZ / 1e6:.3f} MHz")
+        decode_cmd = ['multimon-ng', '-t', 'raw', '-a', 'AFSK1200', '-']
+        line_parser = _parse_multimon_line
+    else:
+        print("APRS: no decoder (direwolf/multimon-ng) found, APRS decode disabled")
+        return
+
+    rtl_proc = None
+    decode_proc = None
+    try:
+        rtl_proc = subprocess.Popen(
+            rtl_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        decode_proc = subprocess.Popen(
+            decode_cmd, stdin=rtl_proc.stdout,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        rtl_proc.stdout.close()  # Allow SIGPIPE if decoder exits
+
+        for line in decode_proc.stdout:
+            if stop_event.is_set():
+                break
+            raw = line_parser(line.strip())
+            if raw:
+                packet = _parse_aprs_packet(raw)
+                if packet:
+                    _add_aprs_packet(st, packet)
+    except Exception as e:
+        print(f"APRS: capture error: {e}")
+    finally:
+        if decode_proc:
+            decode_proc.terminate()
+            try:
+                decode_proc.wait(timeout=3)
+            except Exception:
+                decode_proc.kill()
+        if rtl_proc:
+            rtl_proc.terminate()
+            try:
+                rtl_proc.wait(timeout=3)
+            except Exception:
+                rtl_proc.kill()
+
+
 # ----- Flask App -----
 app = Flask(__name__, static_url_path="", static_folder="web")
 state = ScannerState()
@@ -493,11 +677,21 @@ def api_events():
     def stream():
         # Emit periodic status updates; include heartbeat comments to avoid buffering
         heartbeat = 0
+        last_aprs_seq = state._aprs_seq
         while True:
             st = _build_status_payload()
             yield _sse_format("status", st)
             if st.get("active"):
                 yield _sse_format("activity", {"freq": st["current_freq_str"], "index": st["index"]})
+            # Push new APRS packets
+            cur_seq = state._aprs_seq
+            if cur_seq > last_aprs_seq:
+                with state._lock:
+                    diff = cur_seq - last_aprs_seq
+                    new_pkts = list(state.aprs_log[-diff:]) if diff <= len(state.aprs_log) else list(state.aprs_log)
+                for pkt in new_pkts:
+                    yield _sse_format("aprs", pkt)
+                last_aprs_seq = cur_seq
             heartbeat += 1
             if heartbeat % 8 == 0:
                 # Comment event to nudge proxies/buffers
@@ -629,6 +823,13 @@ def api_set_freq():
                    index=nearest_idx)
 
 
+@app.get("/api/aprs")
+def api_aprs():
+    with state._lock:
+        packets = list(state.aprs_log)
+    return jsonify(packets=packets)
+
+
 def cleanup_existing_processes():
     """Kill any existing scanner_frontend.py processes to prevent conflicts"""
     try:
@@ -654,12 +855,16 @@ def cleanup_existing_processes():
 if __name__ == "__main__":
     print("SnakeScan starting...")
     cleanup_existing_processes()
+    if APRS_ENABLED:
+        print(f"APRS decode enabled on {APRS_FREQ_HZ / 1e6:.3f} MHz")
+        state.start_aprs()
     print("Starting scanner on http://localhost:8080")
     # Start in stopped state; visit http://localhost:8080 to control
     try:
         app.run(host="0.0.0.0", port=8080, debug=False)
     except KeyboardInterrupt:
         print("\nShutting down scanner...")
+        state.stop_aprs()
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
