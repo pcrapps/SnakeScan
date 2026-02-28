@@ -57,6 +57,12 @@
         <div class="stat"><div class="k">GPS Accuracy</div><div class="v" id="accuracy">—</div></div>
       </div>
 
+      <div style="margin-top: 16px;">
+        <div class="meta" style="margin-bottom: 6px;">Spectrum / Waterfall</div>
+        <canvas id="spectrum" width="640" height="120" style="width:100%; display:block; border-radius:8px 8px 0 0; cursor:crosshair; background:#0a0e14;"></canvas>
+        <canvas id="waterfall" width="640" height="200" style="width:100%; display:block; border-radius:0 0 8px 8px; cursor:crosshair; background:#0a0e14;"></canvas>
+      </div>
+
       <footer>
         Basic demo UI – updates ~4×/sec
       </footer>
@@ -216,6 +222,137 @@
       geoBtn.addEventListener('click', () => {
         if (geoWatchId == null) geoOn(); else geoOff();
       });
+
+      // ---- FFT Spectrum & Waterfall ----
+      const specCanvas = $('spectrum');
+      const wfCanvas = $('waterfall');
+      const specCtx = specCanvas.getContext('2d');
+      const wfCtx = wfCanvas.getContext('2d');
+      const FFT_W = 640, SPEC_H = 120, WF_H = 200;
+
+      // Inferno palette (256 RGB entries via linear interpolation)
+      const infernoPalette = (function() {
+        const stops = [
+          [0, 0, 0, 4], [32, 31, 12, 72], [64, 82, 13, 110],
+          [96, 138, 37, 97], [128, 189, 70, 60], [160, 228, 114, 22],
+          [192, 248, 171, 14], [224, 243, 229, 80], [255, 252, 255, 164]
+        ];
+        const p = [];
+        for (let i = 0; i < 256; i++) {
+          let lo = stops[0], hi = stops[stops.length - 1];
+          for (let s = 0; s < stops.length - 1; s++) {
+            if (i >= stops[s][0] && i <= stops[s + 1][0]) {
+              lo = stops[s]; hi = stops[s + 1]; break;
+            }
+          }
+          const t = lo[0] === hi[0] ? 0 : (i - lo[0]) / (hi[0] - lo[0]);
+          p.push([
+            Math.round(lo[1] + t * (hi[1] - lo[1])),
+            Math.round(lo[2] + t * (hi[2] - lo[2])),
+            Math.round(lo[3] + t * (hi[3] - lo[3]))
+          ]);
+        }
+        return p;
+      })();
+
+      // Waterfall image buffer
+      const wfImg = wfCtx.createImageData(FFT_W, WF_H);
+      for (let i = 3; i < wfImg.data.length; i += 4) wfImg.data[i] = 255;
+
+      function drawSpectrum(data) {
+        const { bins, power_db } = data;
+        const n = power_db.length;
+        if (!n) return;
+        const dbMin = Math.min(...power_db);
+        const dbMax = Math.max(...power_db);
+        const range = Math.max(dbMax - dbMin, 10);
+
+        specCtx.clearRect(0, 0, FFT_W, SPEC_H);
+
+        // Grid lines
+        specCtx.strokeStyle = '#1a2535';
+        specCtx.lineWidth = 1;
+        for (let i = 0; i <= 4; i++) {
+          const y = Math.round((i / 4) * SPEC_H) + 0.5;
+          specCtx.beginPath(); specCtx.moveTo(0, y); specCtx.lineTo(FFT_W, y); specCtx.stroke();
+        }
+
+        // Spectrum line
+        specCtx.strokeStyle = '#4cc9f0';
+        specCtx.lineWidth = 1.5;
+        specCtx.beginPath();
+        for (let i = 0; i < n; i++) {
+          const x = (i / (n - 1)) * FFT_W;
+          const y = SPEC_H - ((power_db[i] - dbMin) / range) * (SPEC_H - 10) - 5;
+          if (i === 0) specCtx.moveTo(x, y); else specCtx.lineTo(x, y);
+        }
+        specCtx.stroke();
+
+        // Peak marker
+        let peakIdx = 0;
+        for (let i = 1; i < n; i++) {
+          if (power_db[i] > power_db[peakIdx]) peakIdx = i;
+        }
+        const px = (peakIdx / (n - 1)) * FFT_W;
+        const py = SPEC_H - ((power_db[peakIdx] - dbMin) / range) * (SPEC_H - 10) - 5;
+        specCtx.fillStyle = '#f44';
+        specCtx.beginPath(); specCtx.arc(px, py, 4, 0, Math.PI * 2); specCtx.fill();
+        specCtx.font = '11px system-ui';
+        specCtx.fillText((bins[peakIdx] / 1e6).toFixed(3) + ' MHz', px + 6, py - 4);
+      }
+
+      function drawWaterfall(data) {
+        const { power_db } = data;
+        const n = power_db.length;
+        if (!n) return;
+        const dbMin = Math.min(...power_db);
+        const dbMax = Math.max(...power_db);
+        const range = Math.max(dbMax - dbMin, 10);
+
+        // Scroll existing rows down by 1
+        const d = wfImg.data;
+        const rowBytes = FFT_W * 4;
+        d.copyWithin(rowBytes, 0, rowBytes * (WF_H - 1));
+
+        // Write new row at top (row 0)
+        for (let x = 0; x < FFT_W; x++) {
+          const binIdx = Math.min(n - 1, Math.round((x / (FFT_W - 1)) * (n - 1)));
+          const t = Math.max(0, Math.min(1, (power_db[binIdx] - dbMin) / range));
+          const [r, g, b] = infernoPalette[Math.round(t * 255)];
+          const off = x * 4;
+          d[off] = r; d[off + 1] = g; d[off + 2] = b; d[off + 3] = 255;
+        }
+        wfCtx.putImageData(wfImg, 0, 0);
+      }
+
+      // Click-to-tune on spectrum or waterfall canvas
+      function clickToTune(e) {
+        const rect = e.target.getBoundingClientRect();
+        const xRatio = (e.clientX - rect.left) / rect.width;
+        const freq = 144000000 + xRatio * (148000000 - 144000000);
+        post('/api/set_freq', { freq_hz: Math.round(freq) });
+      }
+      specCanvas.addEventListener('click', clickToTune);
+      wfCanvas.addEventListener('click', clickToTune);
+
+      // FFT polling (1 Hz via requestAnimationFrame)
+      let fftLastMs = 0;
+      function fftPoll(ts) {
+        if (ts - fftLastMs >= 1000) {
+          fftLastMs = ts;
+          fetch('/api/fft', { cache: 'no-store' })
+            .then(r => r.ok ? r.json() : null)
+            .then(d => {
+              if (d && d.bins && d.bins.length) {
+                drawSpectrum(d);
+                drawWaterfall(d);
+              }
+            })
+            .catch(() => {});
+        }
+        requestAnimationFrame(fftPoll);
+      }
+      requestAnimationFrame(fftPoll);
     </script>
   </body>
   </html>

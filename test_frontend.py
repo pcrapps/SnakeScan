@@ -304,3 +304,87 @@ def test_sample_freq_returns_tuple():
     assert isinstance(rms, float)
     assert rms >= 0.0
     assert isinstance(raw, bytes)
+
+
+
+def test_fft_endpoint_structure():
+    """FFT endpoint returns bins, power_db, timestamp when scanner is running."""
+    import scanner_frontend as sf_mod
+    client = sf_mod.app.test_client()
+    sf_mod.state.stop()
+    client.post('/api/start', json={'dwell_seconds': 0.03})
+
+    def has_fft():
+        r = client.get('/api/fft').get_json()
+        return r.get('bins') and len(r['bins']) > 0
+
+    assert _wait_until(has_fft, timeout=3.0), 'FFT data not produced'
+    data = client.get('/api/fft').get_json()
+    assert 'bins' in data
+    assert 'power_db' in data
+    assert 'timestamp' in data
+    assert len(data['bins']) == sf_mod.FFT_BINS
+    assert len(data['power_db']) == sf_mod.FFT_BINS
+    assert isinstance(data['bins'][0], float)
+    assert isinstance(data['power_db'][0], float)
+    client.post('/api/stop')
+
+
+def test_fft_empty_when_stopped():
+    """FFT endpoint returns empty data when scanner is stopped."""
+    import scanner_frontend as sf_mod
+    client = sf_mod.app.test_client()
+    sf_mod.state.stop()
+    time.sleep(0.1)
+    data = client.get('/api/fft').get_json()
+    assert data['bins'] == []
+    assert data['power_db'] == []
+
+
+def test_fft_disabled(monkeypatch):
+    """FFT endpoint returns 404 when FFT_ENABLED is False."""
+    import scanner_frontend as sf_mod
+    monkeypatch.setattr(sf_mod, 'FFT_ENABLED', False)
+    client = sf_mod.app.test_client()
+    resp = client.get('/api/fft')
+    assert resp.status_code == 404
+    data = resp.get_json()
+    assert data['ok'] is False
+
+
+def test_set_freq_endpoint():
+    """POST /api/set_freq tunes to the nearest frequency."""
+    import scanner_frontend as sf_mod
+    client = sf_mod.app.test_client()
+
+    sf_mod.state.stop()
+    sf_mod.state.current_index = 0
+    sf_mod.state.current_freq_hz = sf_mod.state.freqs[0]
+    target_idx = 100
+    target_freq = sf_mod.state.freqs[target_idx]
+
+    resp = client.post('/api/set_freq', json={'freq_hz': target_freq})
+    data = resp.get_json()
+    assert data['ok'] is True
+    assert data['freq_hz'] == target_freq
+    assert data['index'] == target_idx
+    assert 'freq_str' in data
+
+    # Verify state updated
+    st = client.get('/api/status').get_json()
+    assert st['current_freq_hz'] == target_freq
+
+
+def test_set_freq_snaps_to_nearest():
+    """POST /api/set_freq snaps to the nearest valid frequency."""
+    import scanner_frontend as sf_mod
+    client = sf_mod.app.test_client()
+
+    sf_mod.state.stop()
+    # Request a frequency between two steps
+    between_freq = sf_mod.state.freqs[50] + 12000  # 12 kHz off from step
+    resp = client.post('/api/set_freq', json={'freq_hz': between_freq})
+    data = resp.get_json()
+    assert data['ok'] is True
+    # Should snap to nearest (within 25 kHz step)
+    assert abs(data['freq_hz'] - between_freq) <= 25000
