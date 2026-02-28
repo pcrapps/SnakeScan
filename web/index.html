@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SnakeScan – 2m Band Scanner</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
       :root { --bg: #0b0f14; --card: #121821; --ink: #e8f0ff; --muted: #9bb0ca; --accent: #4cc9f0; --ok: #7ee787; --warn: #f2cc60; }
       * { box-sizing: border-box; }
@@ -22,39 +23,106 @@
       .stat { background: #0e141c; border-radius: 10px; padding: 12px; }
       .stat .k { color: var(--muted); font-size: 12px; }
       .stat .v { font-variant-numeric: tabular-nums; font-weight: 700; }
+      /* Tabs */
+      .tabs { display: flex; gap: 0; margin-top: 16px; border-bottom: 2px solid #1e2a38; }
+      .tab { padding: 10px 18px; font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer; border: none; background: none; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+      .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+      .tab-content { display: none; margin-top: 16px; }
+      .tab-content.active { display: block; }
+      #heatmap-canvas { width: 100%; height: 300px; background: #0e141c; border-radius: 8px; cursor: crosshair; }
+      #map { width: 100%; height: 350px; border-radius: 8px; }
+      .heatmap-legend { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+      .heatmap-legend .swatch { width: 16px; height: 12px; border-radius: 2px; }
+      .export-link { color: var(--accent); text-decoration: none; font-size: 13px; }
+      .export-link:hover { text-decoration: underline; }
       footer { margin-top: 16px; color: var(--muted); font-size: 12px; text-align: right; }
+      /* Tabs */
+      .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+      .tabs button { border-radius: 8px 8px 0 0; padding: 8px 20px; font-size: 14px; background: #0e141c; color: var(--muted); }
+      .tabs button.active { background: var(--accent); color: #061017; }
+      .panel { display: none; }
+      .panel.active { display: block; }
+      /* APRS */
+      .aprs-list { max-height: 200px; overflow-y: auto; margin-bottom: 12px; }
+      .aprs-list table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      .aprs-list th { text-align: left; color: var(--muted); font-size: 11px; padding: 4px 6px; border-bottom: 1px solid #243041; position: sticky; top: 0; background: var(--card); }
+      .aprs-list td { padding: 4px 6px; border-bottom: 1px solid #1a2233; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+      .aprs-list tr:hover td { background: #1a2233; }
+      .aprs-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 24px 0; }
+      #aprs-map { height: 280px; border-radius: 10px; margin-top: 8px; background: #0e141c; }
     </style>
   </head>
   <body>
     <main class="card">
-      <h1>📡 SnakeScan – 2m Band</h1>
-      <div class="row" style="margin-bottom: 12px;">
-        <div>
-          <div id="freq" class="freq">144.000 MHz</div>
-          <div class="meta">
-            <span id="status-pill" class="pill off">Stopped</span>
-            <span>•</span>
-            <span id="meta">Dwell 0.50s • 0/0</span>
+      <h1>SnakeScan – 2m Band</h1>
+
+      <div class="tabs">
+        <button class="active" data-tab="scanner-panel">Scanner</button>
+        <button data-tab="aprs-panel">APRS</button>
+        <button data-tab="history-panel">History</button>
+        <button data-tab="map-panel">Map</button>
+      </div>
+
+      <div id="scanner-panel" class="panel active">
+        <div class="row" style="margin-bottom: 12px;">
+          <div>
+            <div id="freq" class="freq">144.000 MHz</div>
+            <div class="meta">
+              <span id="status-pill" class="pill off">Stopped</span>
+              <span>&bull;</span>
+              <span id="meta">Dwell 0.50s &bull; 0/0</span>
+            </div>
+          </div>
+          <div class="row" style="gap: 8px;">
+            <button id="toggle">Start</button>
+            <button id="stop" class="secondary">Stop</button>
+            <button id="hold" class="secondary">Hold 3s</button>
+            <button id="bookmark" class="secondary">Bookmark</button>
+            <button id="geo" class="secondary">Geo OFF</button>
           </div>
         </div>
-        <div class="row" style="gap: 8px;">
-          <button id="toggle">Start</button>
-          <button id="stop" class="secondary">Stop</button>
-          <button id="hold" class="secondary">Hold 3s</button>
-          <button id="bookmark" class="secondary">Bookmark</button>
-          <button id="geo" class="secondary">Geo OFF</button>
+
+        <div class="grid">
+          <div class="stat"><div class="k">Current index</div><div class="v" id="idx">0</div></div>
+          <div class="stat"><div class="k">Total freqs</div><div class="v" id="total">0</div></div>
+          <div class="stat"><div class="k">Dwell (s)</div><div class="v" id="dwell">0.50</div></div>
+          <div class="stat"><div class="k">Running</div><div class="v" id="running">false</div></div>
+          <div class="stat"><div class="k">Hold</div><div class="v" id="holdrem">0.00</div></div>
+          <div class="stat"><div class="k">Location</div><div class="v" id="loc">&mdash;</div></div>
+          <div class="stat"><div class="k">Grid Square</div><div class="v" id="grid">&mdash;</div></div>
+          <div class="stat"><div class="k">GPS Accuracy</div><div class="v" id="accuracy">&mdash;</div></div>
         </div>
       </div>
 
-      <div class="grid">
-        <div class="stat"><div class="k">Current index</div><div class="v" id="idx">0</div></div>
-        <div class="stat"><div class="k">Total freqs</div><div class="v" id="total">0</div></div>
-        <div class="stat"><div class="k">Dwell (s)</div><div class="v" id="dwell">0.50</div></div>
-        <div class="stat"><div class="k">Running</div><div class="v" id="running">false</div></div>
-        <div class="stat"><div class="k">Hold</div><div class="v" id="holdrem">0.00</div></div>
-        <div class="stat"><div class="k">Location</div><div class="v" id="loc">—</div></div>
-        <div class="stat"><div class="k">Grid Square</div><div class="v" id="grid">—</div></div>
-        <div class="stat"><div class="k">GPS Accuracy</div><div class="v" id="accuracy">—</div></div>
+      <div id="aprs-panel" class="panel">
+        <div style="margin-bottom: 8px; color: var(--muted); font-size: 13px;">
+          144.390 MHz &bull; <span id="aprs-count">0</span> packets
+        </div>
+        <div class="aprs-list">
+          <table>
+            <thead><tr><th>Time</th><th>Call</th><th>Pos</th><th>Comment</th></tr></thead>
+            <tbody id="aprs-tbody"></tbody>
+          </table>
+          <div id="aprs-empty" class="aprs-empty">No APRS packets received yet</div>
+        </div>
+        <div id="aprs-map"></div>
+      </div>
+
+      <div id="history-panel" class="panel">
+        <canvas id="heatmap-canvas"></canvas>
+        <div class="heatmap-legend">
+          <span>Hits:</span>
+          <span class="swatch" style="background:#1a1a2e"></span><span>0</span>
+          <span class="swatch" style="background:#16213e"></span><span>1</span>
+          <span class="swatch" style="background:#0f3460"></span><span>2-3</span>
+          <span class="swatch" style="background:#533483"></span><span>4-7</span>
+          <span class="swatch" style="background:#e94560"></span><span>8+</span>
+          <a href="/api/export/csv" class="export-link" style="margin-left:auto">Export CSV</a>
+        </div>
+      </div>
+
+      <div id="map-panel" class="panel">
+        <div id="map"></div>
       </div>
 
       <div style="margin-top: 16px;">
@@ -64,51 +132,67 @@
       </div>
 
       <footer>
-        Basic demo UI – updates ~4×/sec
+        SnakeScan &ndash; updates ~4&times;/sec
       </footer>
     </main>
 
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
       const $ = (id) => document.getElementById(id);
-      const freq = $('freq');
-      const meta = $('meta');
+      const freqEl = $('freq');
+      const metaEl = $('meta');
       const idx = $('idx');
       const total = $('total');
-      const dwell = $('dwell');
-      const running = $('running');
+      const dwellEl = $('dwell');
+      const runningEl = $('running');
       const holdrem = $('holdrem');
       const loc = $('loc');
-      const grid = $('grid');
-      const accuracy = $('accuracy');
-      const toggle = $('toggle');
-      const stop = $('stop');
-      const hold = $('hold');
-      const bookmark = $('bookmark');
+      const gridEl = $('grid');
+      const accuracyEl = $('accuracy');
+      const toggleBtn = $('toggle');
+      const stopBtn = $('stop');
+      const holdBtn = $('hold');
+      const bookmarkBtn = $('bookmark');
       const geoBtn = $('geo');
       let voiceOn = false;
       let lastSpokenFreq = null;
       const pill = $('status-pill');
 
+      /* --- Tab switching --- */
+      document.querySelectorAll('.tabs button').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+          document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+          btn.classList.add('active');
+          $(btn.dataset.tab).classList.add('active');
+          if (btn.dataset.tab === 'aprs-panel' && aprsMap) {
+            aprsMap.invalidateSize();
+          }
+          if (btn.dataset.tab === 'history-panel') loadHeatmap();
+          if (btn.dataset.tab === 'map-panel') loadMap();
+        });
+      });
+
       function updateUI(j) {
-        freq.textContent = j.current_freq_str || '—';
+        freqEl.textContent = j.current_freq_str || '\u2014';
         idx.textContent = j.index ?? 0;
         total.textContent = j.total_freqs ?? 0;
-        dwell.textContent = (j.dwell_seconds ?? 0).toFixed(2);
-        running.textContent = j.running ? 'true' : 'false';
+        dwellEl.textContent = (j.dwell_seconds ?? 0).toFixed(2);
+        runningEl.textContent = j.running ? 'true' : 'false';
         holdrem.textContent = (j.hold_remaining ?? 0).toFixed(2);
         if (j.location) {
           const lat = (+j.location.lat).toFixed(5);
           const lon = (+j.location.lon).toFixed(5);
           loc.textContent = `${lat}, ${lon}`;
-          grid.textContent = j.location.grid_square || '—';
-          accuracy.textContent = j.location.accuracy ? `${(+j.location.accuracy).toFixed(0)}m` : '—';
+          gridEl.textContent = j.location.grid_square || '\u2014';
+          accuracyEl.textContent = j.location.accuracy ? `${(+j.location.accuracy).toFixed(0)}m` : '\u2014';
         } else {
-          loc.textContent = '—';
-          grid.textContent = '—';
-          accuracy.textContent = '—';
+          loc.textContent = '\u2014';
+          gridEl.textContent = '\u2014';
+          accuracyEl.textContent = '\u2014';
         }
-        meta.textContent = `Dwell ${(+j.dwell_seconds).toFixed(2)}s • ${j.index+1}/${j.total_freqs}`;
-        toggle.textContent = j.running ? 'Pause' : 'Start';
+        metaEl.textContent = `Dwell ${(+j.dwell_seconds).toFixed(2)}s \u2022 ${j.index+1}/${j.total_freqs}`;
+        toggleBtn.textContent = j.running ? 'Pause' : 'Start';
         pill.textContent = j.running ? (j.active ? 'Active' : 'Running') : 'Stopped';
         pill.className = 'pill ' + (j.running ? 'on' : 'off');
       }
@@ -128,45 +212,104 @@
         return res.json();
       }
 
-      toggle.addEventListener('click', async () => {
-        await post('/api/toggle');
-        await getStatus();
-      });
-      stop.addEventListener('click', async () => {
-        await post('/api/stop');
-        await getStatus();
-      });
-      hold.addEventListener('click', async () => {
-        await post('/api/hold', { seconds: 3 });
-        await getStatus();
-      });
-      bookmark.addEventListener('click', async () => {
+      toggleBtn.addEventListener('click', async () => { await post('/api/toggle'); await getStatus(); });
+      stopBtn.addEventListener('click', async () => { await post('/api/stop'); await getStatus(); });
+      holdBtn.addEventListener('click', async () => { await post('/api/hold', { seconds: 3 }); await getStatus(); });
+      bookmarkBtn.addEventListener('click', async () => {
         const note = prompt('Optional note/tag for this bookmark:') || undefined;
         const payload = note ? { note } : undefined;
-        const res = await post('/api/bookmark', payload);
-        // lightweight feedback
-        bookmark.textContent = 'Bookmarked';
-        setTimeout(() => (bookmark.textContent = 'Bookmark'), 900);
+        await post('/api/bookmark', payload);
+        bookmarkBtn.textContent = 'Bookmarked';
+        setTimeout(() => (bookmarkBtn.textContent = 'Bookmark'), 900);
       });
 
       // Voice toggle via double-tap on the frequency display
-      freq.addEventListener('dblclick', () => {
+      freqEl.addEventListener('dblclick', () => {
         voiceOn = !voiceOn;
-        freq.style.textDecoration = voiceOn ? 'underline' : '';
+        freqEl.style.textDecoration = voiceOn ? 'underline' : '';
         if (voiceOn && window.speechSynthesis) {
           const u = new SpeechSynthesisUtterance('Voice alerts on');
           speechSynthesis.speak(u);
         }
       });
 
+      /* --- APRS Panel --- */
+      let aprsMap = null;
+      const aprsMarkers = {};
+      const aprsTbody = $('aprs-tbody');
+      const aprsEmpty = $('aprs-empty');
+      const aprsCount = $('aprs-count');
+      let aprsPacketCount = 0;
+
+      function initAprsMap() {
+        aprsMap = L.map('aprs-map').setView([39.8283, -98.5795], 4);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OSM',
+          maxZoom: 18,
+        }).addTo(aprsMap);
+      }
+
+      function addAprsPacket(pkt) {
+        aprsPacketCount++;
+        aprsCount.textContent = aprsPacketCount;
+        aprsEmpty.style.display = 'none';
+
+        // Add row to table (newest first)
+        const tr = document.createElement('tr');
+        const ts = (pkt.timestamp || '').replace(/.*T/, '').replace('Z', '');
+        const posStr = (pkt.lat != null && pkt.lon != null)
+          ? `${(+pkt.lat).toFixed(4)}, ${(+pkt.lon).toFixed(4)}`
+          : '\u2014';
+        tr.innerHTML = `<td>${ts}</td><td>${pkt.from || '\u2014'}</td><td>${posStr}</td><td title="${pkt.comment || pkt.info || ''}">${pkt.comment || ''}</td>`;
+
+        // Click row to show detail
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', () => {
+          if (pkt.lat != null && pkt.lon != null && aprsMap) {
+            aprsMap.setView([pkt.lat, pkt.lon], 12);
+            const key = pkt.from + '|' + pkt.lat + '|' + pkt.lon;
+            if (aprsMarkers[key]) aprsMarkers[key].openPopup();
+          }
+        });
+
+        if (aprsTbody.firstChild) {
+          aprsTbody.insertBefore(tr, aprsTbody.firstChild);
+        } else {
+          aprsTbody.appendChild(tr);
+        }
+
+        // Trim table to 100 rows
+        while (aprsTbody.children.length > 100) {
+          aprsTbody.removeChild(aprsTbody.lastChild);
+        }
+
+        // Add map marker if position exists
+        if (pkt.lat != null && pkt.lon != null && aprsMap) {
+          const key = pkt.from + '|' + pkt.lat + '|' + pkt.lon;
+          if (!aprsMarkers[key]) {
+            const popup = `<b>${pkt.from || 'Unknown'}</b><br>${posStr}<br>${pkt.comment || ''}<br><small>${pkt.timestamp || ''}</small>`;
+            const marker = L.marker([pkt.lat, pkt.lon]).addTo(aprsMap).bindPopup(popup);
+            aprsMarkers[key] = marker;
+          }
+        }
+      }
+
+      // Load existing APRS packets on page load
+      async function loadAprs() {
+        try {
+          const res = await fetch('/api/aprs', { cache: 'no-store' });
+          if (!res.ok) return;
+          const data = await res.json();
+          (data.packets || []).forEach(addAprsPacket);
+        } catch (_) {}
+      }
+
       // Prefer SSE for low-latency updates; fall back to polling
       function setupEvents() {
         if (!('EventSource' in window)) return false;
         try {
           const es = new EventSource('/api/events');
-          es.addEventListener('status', (ev) => {
-            updateUI(JSON.parse(ev.data));
-          });
+          es.addEventListener('status', (ev) => { updateUI(JSON.parse(ev.data)); });
           es.addEventListener('activity', (ev) => {
             if (!voiceOn || !window.speechSynthesis) return;
             const d = JSON.parse(ev.data);
@@ -174,18 +317,20 @@
             speechSynthesis.cancel();
             speechSynthesis.speak(new SpeechSynthesisUtterance('Active ' + text + ', holding'));
           });
+          es.addEventListener('aprs', (ev) => {
+            addAprsPacket(JSON.parse(ev.data));
+          });
           return true;
         } catch (_) { return false; }
       }
 
       if (!setupEvents()) {
-        // Poll status 4x/sec fallback
         getStatus();
         setInterval(async () => {
           await getStatus();
           if (!voiceOn || !window.speechSynthesis) return;
-          const f = freq.textContent;
-          if (f && f !== lastSpokenFreq && running.textContent === 'true') {
+          const f = freqEl.textContent;
+          if (f && f !== lastSpokenFreq && runningEl.textContent === 'true') {
             lastSpokenFreq = f;
             const text = f.replace('MHz', ' mega hertz');
             speechSynthesis.cancel();
@@ -194,34 +339,23 @@
         }, 250);
       }
 
-      // Geo (optional): request browser location and send to server
+      // Geo (optional)
       let geoWatchId = null;
       function geoOn() {
         if (!('geolocation' in navigator)) return alert('No geolocation available');
         geoBtn.textContent = 'Geo ON';
         geoWatchId = navigator.geolocation.watchPosition((pos) => {
           const c = pos.coords || {};
-          post('/api/geo', {
-            lat: c.latitude,
-            lon: c.longitude,
-            accuracy: c.accuracy,
-            speed: c.speed,
-            heading: c.heading
-          }).catch(()=>{});
-        }, (err) => {
-          console.warn('geo error', err);
-        }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 8000 });
+          post('/api/geo', { lat: c.latitude, lon: c.longitude, accuracy: c.accuracy, speed: c.speed, heading: c.heading }).catch(()=>{});
+        }, (err) => { console.warn('geo error', err); },
+        { enableHighAccuracy: true, maximumAge: 5000, timeout: 8000 });
       }
       function geoOff() {
         geoBtn.textContent = 'Geo OFF';
-        if (geoWatchId != null && navigator.geolocation) {
-          navigator.geolocation.clearWatch(geoWatchId);
-        }
+        if (geoWatchId != null && navigator.geolocation) navigator.geolocation.clearWatch(geoWatchId);
         geoWatchId = null;
       }
-      geoBtn.addEventListener('click', () => {
-        if (geoWatchId == null) geoOn(); else geoOff();
-      });
+      geoBtn.addEventListener('click', () => { if (geoWatchId == null) geoOn(); else geoOff(); });
 
       // ---- FFT Spectrum & Waterfall ----
       const specCanvas = $('spectrum');
@@ -353,6 +487,148 @@
         requestAnimationFrame(fftPoll);
       }
       requestAnimationFrame(fftPoll);
+
+      // Init APRS map and load existing packets
+      initAprsMap();
+      loadAprs();
+
+      // ---- History: Time x Frequency Heatmap (Canvas) ----
+      const heatColors = ['#1a1a2e','#16213e','#0f3460','#533483','#e94560'];
+      function countToColor(n) {
+        if (n <= 0) return heatColors[0];
+        if (n === 1) return heatColors[1];
+        if (n <= 3) return heatColors[2];
+        if (n <= 7) return heatColors[3];
+        return heatColors[4];
+      }
+
+      async function loadHeatmap() {
+        const canvas = $('heatmap-canvas');
+        const ctx = canvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr);
+        const W = rect.width, H = rect.height;
+        ctx.fillStyle = '#0e141c';
+        ctx.fillRect(0, 0, W, H);
+
+        let data;
+        try {
+          const res = await fetch('/api/heatmap/frequency');
+          data = await res.json();
+        } catch (e) { return; }
+
+        const { buckets, freqs, counts } = data;
+        if (!buckets.length || !freqs.length) {
+          ctx.fillStyle = '#9bb0ca';
+          ctx.font = '14px system-ui';
+          ctx.textAlign = 'center';
+          ctx.fillText('No event data yet', W/2, H/2);
+          return;
+        }
+
+        const marginL = 70, marginB = 40, marginT = 10, marginR = 10;
+        const plotW = W - marginL - marginR;
+        const plotH = H - marginT - marginB;
+        const cellW = plotW / buckets.length;
+        const cellH = plotH / freqs.length;
+
+        // Draw cells
+        for (let fi = 0; fi < freqs.length; fi++) {
+          for (let bi = 0; bi < buckets.length; bi++) {
+            ctx.fillStyle = countToColor(counts[fi][bi]);
+            ctx.fillRect(marginL + bi * cellW, marginT + fi * cellH, Math.ceil(cellW), Math.ceil(cellH));
+          }
+        }
+
+        // Y axis labels (freq)
+        ctx.fillStyle = '#9bb0ca';
+        ctx.font = '10px system-ui';
+        ctx.textAlign = 'right';
+        const yStep = Math.max(1, Math.floor(freqs.length / 8));
+        for (let fi = 0; fi < freqs.length; fi += yStep) {
+          const y = marginT + fi * cellH + cellH / 2;
+          ctx.fillText((freqs[fi] / 1e6).toFixed(2), marginL - 4, y + 3);
+        }
+
+        // X axis labels (time)
+        ctx.textAlign = 'center';
+        const xStep = Math.max(1, Math.floor(buckets.length / 6));
+        for (let bi = 0; bi < buckets.length; bi += xStep) {
+          const x = marginL + bi * cellW + cellW / 2;
+          const label = buckets[bi].slice(11, 16) || buckets[bi].slice(0, 10);
+          ctx.fillText(label, x, H - marginB + 14);
+        }
+
+        // Axis titles
+        ctx.save();
+        ctx.translate(12, marginT + plotH / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.fillText('Frequency (MHz)', 0, 0);
+        ctx.restore();
+        ctx.textAlign = 'center';
+        ctx.fillText('Time', marginL + plotW / 2, H - 4);
+      }
+
+      // ---- Map tab: Leaflet.js ----
+      let leafletMap = null;
+      let mapMarkers = [];
+
+      function freqToHue(fhz) {
+        // Map 144-148 MHz to hue 0-270
+        const mhz = fhz / 1e6;
+        return ((mhz - 144) / 4) * 270;
+      }
+
+      async function loadMap() {
+        const container = $('map');
+        if (!leafletMap) {
+          leafletMap = L.map(container).setView([39.8, -98.5], 4);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors',
+            maxZoom: 18,
+          }).addTo(leafletMap);
+        }
+        setTimeout(() => leafletMap.invalidateSize(), 100);
+
+        // Clear old markers
+        mapMarkers.forEach(m => leafletMap.removeLayer(m));
+        mapMarkers = [];
+
+        let geo;
+        try {
+          const res = await fetch('/api/heatmap/geo');
+          geo = await res.json();
+        } catch (e) { return; }
+
+        if (!geo.features || !geo.features.length) return;
+
+        const bounds = [];
+        geo.features.forEach(f => {
+          const [lon, lat] = f.geometry.coordinates;
+          const p = f.properties;
+          const hue = freqToHue(p.freq_hz);
+          const radius = Math.min(5 + p.count * 2, 20);
+          const marker = L.circleMarker([lat, lon], {
+            radius: radius,
+            fillColor: `hsl(${hue}, 80%, 55%)`,
+            color: `hsl(${hue}, 80%, 35%)`,
+            weight: 1,
+            fillOpacity: 0.7,
+          }).addTo(leafletMap);
+          marker.bindTooltip(
+            `<b>${(p.freq_hz/1e6).toFixed(3)} MHz</b><br>Hits: ${p.count}<br>Last: ${p.last_seen || '?'}<br>Grid: ${p.grid_square || '?'}`,
+            { direction: 'top' }
+          );
+          mapMarkers.push(marker);
+          bounds.push([lat, lon]);
+        });
+
+        if (bounds.length) leafletMap.fitBounds(bounds, { padding: [30, 30] });
+      }
     </script>
   </body>
-  </html>
+</html>

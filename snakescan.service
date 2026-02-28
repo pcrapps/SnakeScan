@@ -1,0 +1,21 @@
+[Unit]
+Description=SnakeScan 2m Band Scanner
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=snakescan
+Group=snakescan
+WorkingDirectory=/opt/snakescan
+EnvironmentFile=/etc/snakescan/snakescan.env
+ExecStart=/opt/snakescan/venv/bin/python3 scanner_frontend.py
+Restart=on-failure
+RestartSec=5
+WatchdogSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=snakescan
+
+[Install]
+WantedBy=multi-user.target
