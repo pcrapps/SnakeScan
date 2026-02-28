@@ -14,6 +14,9 @@ import numpy as np
 import csv
 import datetime as _dt
 import pathlib
+import io
+
+import db as _db
 
 from ai_classifier import classify_signal
 
@@ -280,6 +283,7 @@ class ScannerState:
                 # Submit AI classification in background
                 if AI_CLASSIFY_ENABLED and _raw_audio:
                     _submit_classification(self, self.current_freq_hz, _raw_audio)
+                _log_to_db(self)
 
             # If active, set hold window
             if self.active and self.hold_seconds > 0:
@@ -411,6 +415,26 @@ def _log_activity_hit(st: ScannerState) -> None:
         st._activity_file.flush()
 
 
+def _log_to_db(st: ScannerState) -> None:
+    """Log an activity hit to the SQLite event database."""
+    event = {
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "freq_hz": st.current_freq_hz,
+        "rms": round(st.rms, 6),
+        "held": 1 if st.hold_seconds > 0 else 0,
+        "gain": st.sdr_gain,
+        "ppm": st.sdr_ppm,
+    }
+    if st.last_location:
+        event["lat"] = st.last_location.get("lat")
+        event["lon"] = st.last_location.get("lon")
+        event["grid_square"] = st.last_location.get("grid_square")
+    try:
+        _db.log_event(event)
+    except Exception:
+        pass
+
+
 @app.get("/")
 def index():
     return send_from_directory("web", "index.html")
@@ -490,6 +514,15 @@ def _sse_format(event: str, data: dict) -> str:
 
 @app.get("/api/events")
 def api_events():
+    # If query params present, return JSON from DB; otherwise SSE stream
+    if request.args.get("limit") or request.args.get("freq") or request.args.get("since"):
+        limit = int(request.args.get("limit", 100))
+        freq = request.args.get("freq")
+        freq_hz = int(freq) if freq else None
+        since = request.args.get("since")
+        rows = _db.query_events(limit=limit, freq_hz=freq_hz, since=since)
+        return jsonify(events=rows)
+
     def stream():
         # Emit periodic status updates; include heartbeat comments to avoid buffering
         heartbeat = 0
@@ -629,6 +662,35 @@ def api_set_freq():
                    index=nearest_idx)
 
 
+@app.get("/api/heatmap/frequency")
+def api_heatmap_frequency():
+    since = request.args.get("since")
+    bucket = int(request.args.get("bucket_minutes", 15))
+    return jsonify(_db.heatmap_frequency(since=since, bucket_minutes=bucket))
+
+
+@app.get("/api/heatmap/geo")
+def api_heatmap_geo():
+    return jsonify(_db.heatmap_geo())
+
+
+@app.get("/api/export/csv")
+def api_export_csv():
+    rows = _db.export_csv_rows()
+    if not rows:
+        return Response("", mimetype="text/csv", headers={
+            "Content-Disposition": "attachment; filename=events.csv"
+        })
+    fieldnames = list(rows[0].keys())
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    return Response(buf.getvalue(), mimetype="text/csv", headers={
+        "Content-Disposition": "attachment; filename=events.csv"
+    })
+
+
 def cleanup_existing_processes():
     """Kill any existing scanner_frontend.py processes to prevent conflicts"""
     try:
@@ -653,6 +715,7 @@ def cleanup_existing_processes():
 
 if __name__ == "__main__":
     print("SnakeScan starting...")
+    _db.init_db()
     cleanup_existing_processes()
     print("Starting scanner on http://localhost:8080")
     # Start in stopped state; visit http://localhost:8080 to control
