@@ -8,11 +8,20 @@ import sys
 import os
 import shutil
 
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 import numpy as np
 import csv
 import datetime as _dt
 import pathlib
+
+from ai_classifier import classify_signal
+
+# ----- AI Classification Config (env vars) -----
+AI_CLASSIFY_ENABLED = os.environ.get("AI_CLASSIFY_ENABLED", "false").lower() == "true"
+AI_VISION_API_URL = os.environ.get("AI_VISION_API_URL", "http://localhost:1234/v1/chat/completions")
+AI_VISION_MODEL = os.environ.get("AI_VISION_MODEL", "qwen3-vl-8b")
+AI_CAPTURE_SECONDS = float(os.environ.get("AI_CAPTURE_SECONDS", "0.5"))
 
 
 # ----- GPS Utilities -----
@@ -86,10 +95,10 @@ def _check_rtl_available() -> bool:
 
 
 def _sample_freq(freq_hz: int, dwell: float, gain: int = 25,
-                 squelch_db: int = 5, ppm: int = 0, sr: int = 22050) -> float:
-    """Capture audio from rtl_fm at freq_hz for dwell seconds, return RMS.
+                 squelch_db: int = 5, ppm: int = 0, sr: int = 22050) -> tuple[float, bytes]:
+    """Capture audio from rtl_fm at freq_hz for dwell seconds.
 
-    Returns 0.0 on any error (missing binary, timeout, device busy, etc).
+    Returns (rms, raw_bytes). Returns (0.0, b'') on any error.
     """
     try:
         cmd = [
@@ -109,11 +118,12 @@ def _sample_freq(freq_hz: int, dwell: float, gain: int = 25,
                                 timeout=dwell + 5)
         raw = result.stdout
         if len(raw) < 2:
-            return 0.0
+            return 0.0, b""
         data = np.frombuffer(raw, dtype=np.int16)
-        return float(np.sqrt(np.mean((data / 32768.0) ** 2)))
+        rms = float(np.sqrt(np.mean((data / 32768.0) ** 2)))
+        return rms, raw
     except Exception:
-        return 0.0
+        return 0.0, b""
 
 
 @dataclass
@@ -151,6 +161,9 @@ class ScannerState:
         )
     )
     _rtl_available: bool | None = None  # None = not yet probed
+    # AI classification
+    last_classification: dict | None = None
+    _ai_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
     # Cached activity log file handle (opened lazily, closed on stop)
     _activity_file: object | None = field(default=None, init=False, repr=False)
     _activity_writer: object | None = field(default=None, init=False, repr=False)
@@ -223,6 +236,7 @@ class ScannerState:
             # 2. RTL-SDR hardware via rtl_fm — real RMS sampling
             # 3. Fallback: no activity
             _used_hardware = False
+            _raw_audio = b""
             if self.force_active_indices:
                 self.active = self.current_index in self.force_active_indices
                 self.rms = 1.0 if self.active else 0.0
@@ -230,7 +244,7 @@ class ScannerState:
                 if self._rtl_available is None:
                     self._rtl_available = _check_rtl_available()
                 if self._rtl_available:
-                    self.rms = _sample_freq(
+                    self.rms, _raw_audio = _sample_freq(
                         self.current_freq_hz, self.dwell_seconds,
                         self.sdr_gain, self.sdr_squelch_db,
                         self.sdr_ppm, self.sdr_sample_rate,
@@ -246,6 +260,9 @@ class ScannerState:
                 self.hit_count += 1
                 self.unique_freqs.add(self.current_freq_hz)
                 _log_activity_hit(self)
+                # Submit AI classification in background
+                if AI_CLASSIFY_ENABLED and _raw_audio:
+                    _submit_classification(self, self.current_freq_hz, _raw_audio)
 
             # If active, set hold window
             if self.active and self.hold_seconds > 0:
@@ -267,6 +284,18 @@ class ScannerState:
 
             # Advance to next only if not stopped during dwell and not holding
             self.current_index = (self.current_index + 1) % len(self.freqs)
+
+
+def _submit_classification(st: ScannerState, freq_hz: int, audio_bytes: bytes) -> None:
+    """Submit an AI classification job to the background executor."""
+    if st._ai_executor is None:
+        st._ai_executor = ThreadPoolExecutor(max_workers=1)
+
+    def _do_classify():
+        result = classify_signal(freq_hz, audio_bytes, AI_VISION_API_URL, AI_VISION_MODEL)
+        st.last_classification = result
+
+    st._ai_executor.submit(_do_classify)
 
 
 # ----- Flask App -----
@@ -501,6 +530,13 @@ def api_geo_update():
 
     state.last_location = validated_location
     return jsonify(ok=True, location=state.last_location)
+
+
+@app.get("/api/last_classification")
+def api_last_classification():
+    if state.last_classification is None:
+        return jsonify(ok=True, classification=None)
+    return jsonify(ok=True, **state.last_classification)
 
 
 def cleanup_existing_processes():

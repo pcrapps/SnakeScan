@@ -297,9 +297,10 @@ def test_rtl_fallback_no_hardware():
     client.post('/api/stop')
 
 
-def test_sample_freq_returns_float():
-    """_sample_freq returns a float >= 0 even without hardware."""
+def test_sample_freq_returns_tuple():
+    """_sample_freq returns (rms, raw_bytes) even without hardware."""
     import scanner_frontend as sf_mod
-    rms = sf_mod._sample_freq(146520000, 0.1)
+    rms, raw = sf_mod._sample_freq(146520000, 0.1)
     assert isinstance(rms, float)
     assert rms >= 0.0
+    assert isinstance(raw, bytes)
